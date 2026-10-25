@@ -34,6 +34,7 @@ var ProtectedFiles = []string{
 	"containment/go/hook/install.go",
 	"containment/go/hook/protect.go",
 	"containment/go/hook/shell.go",
+	"containment/go/hook/elevated.go",
 	"containment/go/cmd/d1-nonet/main.go",
 	"containment/go/cmd/d1-localonly/main.go",
 	"containment/go/cmd/d1-agent-hook/main.go",

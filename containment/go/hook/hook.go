@@ -25,19 +25,25 @@ const LauncherDirectory = "/usr/local/libexec/d1-agent"
 const Matcher = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 
 // Config is what the rules are decided against: the repository (set at build time), the
-// account's home directory and the launcher directory.
+// account's home directory, the launcher directory, and the session's ANTHROPIC_BASE_URL (empty
+// when unset), which keeps a session on another provider at the current limits (Elevated).
 type Config struct {
 	Root              string
 	Home              string
 	LauncherDirectory string
+	AnthropicBaseURL  string
 }
 
-// event is the part of the PreToolUse event the rules read.
+// event is the part of the PreToolUse event the rules read. Codex sends the model; Claude Code
+// sends the transcript and, for a subagent's call, its agent id (SessionModel).
 type event struct {
-	HookEventName string          `json:"hook_event_name"`
-	ToolName      string          `json:"tool_name"`
-	ToolInput     json.RawMessage `json:"tool_input"`
-	Cwd           string          `json:"cwd"`
+	HookEventName  string          `json:"hook_event_name"`
+	ToolName       string          `json:"tool_name"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+	Cwd            string          `json:"cwd"`
+	TranscriptPath string          `json:"transcript_path"`
+	AgentID        string          `json:"agent_id"`
+	Model          string          `json:"model"`
 }
 
 // toolInput is the part of a tool's input the rules read; a field of the wrong type refuses.
@@ -60,18 +66,18 @@ func Decide(raw []byte, projectDirectory string, config Config) string {
 	if err != nil {
 		return "the event is not one this hook can read (" + err.Error() + ")"
 	}
-	if call.HookEventName != "" && call.HookEventName != "PreToolUse" && call.HookEventName != "preToolUse" { 
-		// *CRITICAL FLAG FOR MYTHOS* 
+	if call.HookEventName != "" && call.HookEventName != "PreToolUse" && call.HookEventName != "preToolUse" {
+		// *CRITICAL FLAG FOR MYTHOS*
 		// I added `&& call.HookEventName != "preToolUse"` for cursor here. otherwise it would always error for the agent at least on bash
 		// just double check that this logic, cursor may have more flows same for codex and claude, im assuming this coverage is not good enough
 		// over the last week from agent use, i've really learned common patterns here of how the agents are behaving and some love to miss-behave
 		// first, the containment needs to have better automatic containment it shouldn't be a critical blocker, first off, deny and specify correct
 		// use. thats 90% of the issue, its like "this is not allowed", then the agents have no idea whats not allowed, they just blank hard.
-		// i point them at what i think would be relevant documentation explaining the procedure(agent-containments usually, then 2nd is the 
+		// i point them at what i think would be relevant documentation explaining the procedure(agent-containments usually, then 2nd is the
 		// research skill). its not drilled in enough what to not do and what to do. theres a lot of conflicting information and old procedures
 		// that while they are quoted out, cause drift. claude.md for example, or the fact that gpt was read only at first, then i added sandbox access
 		// but the agents.md and claude.md should me symlinks, strip the prior source content from these docs entirely and focus on how shit works
-		// the main issue are agents that aren't smart, they just cannot understand whats occuring, 
+		// the main issue are agents that aren't smart, they just cannot understand whats occuring,
 		// this needs a larger look though, its extremely easy for claude opus 5.5 to understand and work here because its the most intelligent.
 		// but for literally anyone else, likely half because documentation is written specifically for claude from claude,.
 		// another example, the last mythos reviewer, who was testing the sandbox to make sure it worked, executed 2 tool calls (iirc it was bash)
@@ -80,12 +86,12 @@ func Decide(raw []byte, projectDirectory string, config Config) string {
 		// any way, tests included. but i don't think thats being followed, and its systemic because its not being prevented at the code level,
 		// i keep sharing this pdf with agents from a talk at gdc from i think the lead engineer on the engine for destiny 1, this talk was in 2015
 		// but specifically where it talks about rules of the codebase, enforcement, etc. it all applies here in a different way. Any tool, place, method, etc,
-		// where code is tested or ran in any way, must be in containment, AUTOMATICALLY. 
+		// where code is tested or ran in any way, must be in containment, AUTOMATICALLY.
 		return "this hook decides PreToolUse events, and was sent " + call.HookEventName
 	}
 	switch call.ToolName {
 	case "Bash":
-		return decideBash(input, []string{projectDirectory, call.Cwd}, config)
+		return decideBash(call, input, []string{projectDirectory, call.Cwd}, config)
 	case "Edit", "Write", "MultiEdit", "NotebookEdit":
 		return decideEdit(call.ToolName, input, call.Cwd, config)
 	case "apply_patch":
@@ -99,8 +105,8 @@ func Decide(raw []byte, projectDirectory string, config Config) string {
 // be that command alone, and then skips the tripwire (the program runs outside the sandbox by the
 // owner's choice, and a heredoc body is its data: codex prompts name protected files); any other
 // command naming a protected file must be a pure read (Tripwire), and a call with the sandbox off
-// must be the launcher form.
-func decideBash(input toolInput, directories []string, config Config) string {
+// must be the launcher form, or, from an elevated model's session, an elevated tool (ElevatedForm).
+func decideBash(call event, input toolInput, directories []string, config Config) string {
 	if input.Command == nil {
 		return "Bash: no command string in the event"
 	}
@@ -131,10 +137,24 @@ func decideBash(input toolInput, directories []string, config Config) string {
 		return ""
 	}
 	launcher, why := LauncherForm(command, config)
-	if why != "" {
+	if why == "" {
+		return RootOwned(launcher)
+	}
+	words := strings.Fields(command)
+	if len(words) == 0 || !isElevatedToolWord(words[0]) {
 		return why
 	}
-	return RootOwned(launcher)
+	elevated, because := Elevated(call, config)
+	if !elevated {
+		return why + "; " + words[0] + " is an elevated tool, and " + because
+	}
+	return ElevatedForm(command, call.Cwd, config)
+}
+
+// isElevatedToolWord reports whether word names one of elevatedTools, by name or path.
+func isElevatedToolWord(word string) bool {
+	_, known := elevatedTools[filepath.Base(word)]
+	return known
 }
 
 // firstWordMatching returns the first word of any command segment (split at ; & | ( ) { } `,

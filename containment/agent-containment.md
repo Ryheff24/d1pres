@@ -116,6 +116,45 @@ on it. A test that needs a socket fails, visibly, and gets an in-memory transpor
   workspace tool (not a test) that opens a socket. Both are deliberate evasions of the rule above,
   which the hook and the instructions forbid; neither is a path a test takes by accident.
 
+## Elevated tools by model (owner, 2026-10-25)
+
+The owner's ruling: "gpt sol 6.1, gpt 6 astra, claude 5.5, fable 5.1 - elevated; everything else -
+current limit". Elevated means basic process management and system tools, outside the sandbox,
+and nothing more: the agents that clean up after themselves need them, and the rest keep today's
+limits. The hook decides it per call (`containment/go/hook/elevated.go`).
+
+- **Which model makes the call.** Codex puts the model in the hook event. Claude Code does not:
+  the hook reads `message.model` of the last assistant entry in the session's transcript, parsed
+  as JSON (a subagent's call is read from its own file beside the transcript, by `agent_id`).
+  Elevated are exactly `gpt-6.1-sol`, `gpt-6-astra`, `claude-opus-5-5` and `claude-fable-5-1`; a
+  provider-prefixed id (`anthropic/claude-opus-5-5` through OpenRouter) is not. A Claude Code
+  session whose `ANTHROPIC_BASE_URL` is set to anything but Anthropic's API stays at the current
+  limits whatever model it names. Anything the hook cannot read is the current limit.
+- **The records cannot be rewritten.** The edit tools and `apply_patch` are refused under
+  `~/.claude/projects` (except each project's `memory/`) and `~/.codex/sessions`, for every model;
+  Claude Code's sandbox already denies Bash writes there.
+- **What elevated adds,** only with the sandbox off, as one command with no shell syntax beyond
+  quotes and `|` into `grep`, `head`, `tail` or `wc`, each program at its system path:
+  - `ps`, `pgrep`, `lsof`, `nettop`, `top`, `vm_stat`, `sample`, `leaks`, `vmmap`, `heap`, without
+    their writing options (`sample -file`, `-e`; `leaks --outputGraph`, `--atExit`, `--`), and
+    `nettop` and `top` only in logging mode (`-l N`), so they end;
+  - `kill`, `pkill` and `killall` only at this project's processes: working in the repository,
+    and built in it, named `d1-*`, or one of `z3`, `java`, `tlapm`, `poly`, `make`. Never an agent
+    session (claude, node, codex) or another project's process; `pkill` and `killall` are resolved
+    with `pgrep` first and refused if any match is not the project's;
+  - `code` (`-r`, `-g`) only on existing files in the repository: never a folder, a
+    `.code-workspace` file, or anything under `.vscode/` or `.git/`, since opening a folder or
+    workspace can start its tasks.
+- **Everything else is unchanged, for every model:** the launchers, the tripwire, the protected
+  files, game binaries only under `d1-nonet`, tests only under `d1-nonet`.
+- **Tightened for every model the same day:** `xcrun` outside the sandbox only queries the SDK
+  (`--show-sdk-*`, `-f`, `--find`, `--sdk NAME` with one of them) or starts `simctl`, `devicectl`
+  or `xctrace`, and `xctrace` never with `--launch`. Before, `xcrun python3`, `xcrun swift` and
+  `xctrace record --launch` ran any code outside containment from any session.
+- **Known limits.** `xcodebuild` (its build-phase scripts) and `security` (keychain reads) still
+  run outside the sandbox for every model, by the owner's 2026-10-16 choice. A bare tool name is
+  checked against the hook's PATH, which can differ from the shell's.
+
 ## Procedure part: agent docs (CLAUDE.md, plus AGENTS.md for Codex)
 
 A short section, "Running the game or anything network-touching":
