@@ -1,0 +1,13 @@
+diff --git a/containment/install.sh b/containment/install.sh
+--- a/containment/install.sh
++++ b/containment/install.sh
+@@ -25,7 +25,8 @@ echo "== test gate (every Rust and Go test runs inside the game profile; agent-conta
+ go run ./cmd/d1-testgate-header "$root" > "$build/d1testgate-profile.h"
+ cc -O2 -Wall -include "$build/d1testgate-profile.h" -Dd1_netgate=d1_testgate_netgate -c ../c/d1netgate.c -o "$build/d1netgate.o"
+ cc -O2 -Wall -c ../c/d1testgate.c -o "$build/d1testgate.o"
+-ar rcs "$build/libd1testgate.a" "$build/d1netgate.o" "$build/d1testgate.o"
++# Apple's linker requires 8-byte-aligned Mach-O members; GNU ar on PATH does not supply them.
++/usr/bin/ar rcs "$build/libd1testgate.a" "$build/d1netgate.o" "$build/d1testgate.o"
+ 
+ echo "== install (root-owned, sudo)"
+ sudo install -d -o root -g wheel -m 0755 "$install_dir"

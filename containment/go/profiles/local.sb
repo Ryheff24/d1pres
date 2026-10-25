@@ -1,0 +1,74 @@
+(version 1)
+; The this-Mac-only policy, one rule per line. d1-localonly embeds this file and applies it after
+; gate.NormalizeWith puts in this repository's root for REPO and the account's home for HOME.
+; For the servers and tools that talk to them; game code and every test run under game.sb (d1-nonet).
+; "localhost" is Seatbelt's word for loopback and this Mac's own addresses: never another machine.
+; Everything not denied below stays allowed; later rules win over earlier ones.
+(allow default) ; servers and cargo run; the rules below remove what reaches beyond this Mac
+(deny network*) ; nothing reaches the network unless a rule below admits it; Unix socket paths stay denied
+(allow network-outbound (remote ip "localhost:80") (remote ip "localhost:8080") (remote ip "localhost:31315")) ; d1-responder HTTP
+(allow network-outbound (remote ip "localhost:8788") (remote ip "localhost:8789")) ; d1-forge's control planes (d1-responder serves 8788 too)
+(allow network-outbound (remote ip "localhost:443") (remote ip "localhost:32556")) ; d1-responder TLS: PSN sign-in, Demonware ticket drop
+(allow network-outbound (remote ip "localhost:3074") (remote ip "localhost:3075")) ; UDP: the game's port, d1-responder's BAP
+(allow network-outbound (remote ip "localhost:31313") (remote ip "localhost:31314")) ; shadnet-server TCP, its signaling UDP
+(allow network-outbound (remote ip "localhost:4110") (remote ip "localhost:8787")) ; the Activity Host, d1 serve
+(allow network-bind network-inbound (local ip "localhost:*")) ; listen on this Mac; Seatbelt cannot narrow it to loopback
+(deny socket-option-set (socket-option-level 0) (socket-option-level 41)) ; no IPv4 or IPv6 options: a multicast join sends IGMP
+(deny mach-lookup (global-name "com.apple.nsurlsessiond") (global-name "com.apple.nsurlstoraged")) ; URL downloads done by a daemon
+(deny mach-lookup (global-name "com.apple.dnssd.service") (global-name "com.apple.mDNSResponder")) ; DNS: no name resolves
+(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.lsd.mapdb")) ; launching apps
+(deny mach-lookup (global-name "com.apple.lsd.modifydb") (global-name "com.apple.lsd.open")) ; LaunchServices opening a URL or file
+(deny mach-lookup (global-name "com.apple.coreservices.quarantine-resolver")) ; the launch fallback LaunchServices takes when the four names above are denied; without it an app launch still succeeds (measured 2026-10-17 under game.sb, reviews/REVIEW-claude-launchservices-2026-10-17.md)
+(deny mach-lookup (global-name "com.apple.coreservices.appleevents")) ; scripting other apps
+(deny mach-lookup (global-name "com.apple.networkd") (global-name "com.apple.networkd_privileged")) ; the network daemon
+(deny mach-lookup (global-name "com.apple.nehelper")) ; network extensions and VPN
+(deny process-exec (literal "/usr/bin/open") (literal "/usr/bin/osascript")) ; both hand work to unsandboxed apps
+(deny job-creation) ; a launchd job would run outside this sandbox
+(deny file-write*) ; writes only where the next rules allow
+(allow file-write* (subpath "/private/tmp") (subpath "/private/var/folders")) ; temporary space
+(allow file-write* (subpath (param "REPO"))) ; the repository: runs/, target/, the servers' own output
+(allow file-write* (subpath (string-append (param "HOME") "/.cargo/registry"))) ; cargo's download cache
+(allow file-write* (subpath (string-append (param "HOME") "/.cargo/git"))) ; cargo's git cache; never ~/.cargo/bin or ~/.rustup
+(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper")) ; devices every process writes
+; The protected files (gate.ProtectedFiles; the hook refuses edits to the same list), each as one
+; exact path, and every directory above one as one exact path too: Seatbelt does not stop renaming a
+; denied file's parent, so "mv containment x", an edit and a rename back would get around a file
+; rule (measured). An exact path on a directory stops that rename and leaves the files inside it
+; writable.
+(define (repo-path path) (literal (string-append (param "REPO") path))) ; REPO followed by path, exactly
+(deny file-write* (repo-path "") (repo-path "/CLAUDE.md") (repo-path "/AGENTS.md")) ; the repository itself and the agent instructions
+(deny file-write* (repo-path "/.claude") (repo-path "/.claude/settings.json") (repo-path "/.claude/settings.local.json")) ; Claude Code's project settings
+(deny file-write* (repo-path "/.git") (repo-path "/.git/config") (repo-path "/.git/hooks") (repo-path "/.git/hooks/pre-push")) ; what git runs for the owner
+(deny file-write* (repo-path "/.cargo") (repo-path "/.cargo/config.toml")) ; cargo configuration for the owner's builds
+(deny file-write* (repo-path "/d1-server/.cargo") (repo-path "/d1-server/.cargo/config.toml")) ; the same for the workspace
+(deny file-write* (repo-path "/containment") (repo-path "/containment/agent-containment.md") (repo-path "/containment/install.sh")) ; the procedure and the owner's install script
+(deny file-write* (repo-path "/containment/c") (repo-path "/containment/c/d1netgate.c")) ; the C gate
+(deny file-write* (repo-path "/containment/go") (repo-path "/containment/go/profile.go")) ; the Go module and its embedded policies
+(deny file-write* (repo-path "/containment/go/profiles") (repo-path "/containment/go/profiles/game.sb") (repo-path "/containment/go/profiles/local.sb")) ; the policies
+(deny file-write* (repo-path "/containment/go/gate") (repo-path "/containment/go/gate/gate.go")) ; the probes
+(deny file-write* (repo-path "/containment/go/gate/launch.go") (repo-path "/containment/go/gate/local.go")) ; the launch steps, local probes and this list
+(deny file-write* (repo-path "/containment/go/hook") (repo-path "/containment/go/hook/hook.go")) ; the hook's rules
+(deny file-write* (repo-path "/containment/go/hook/install.go") (repo-path "/containment/go/hook/protect.go") (repo-path "/containment/go/hook/shell.go")) ; and the rest of them
+(deny file-write* (repo-path "/containment/go/cmd") (repo-path "/containment/go/cmd/d1-nonet") (repo-path "/containment/go/cmd/d1-nonet/main.go")) ; d1-nonet
+(deny file-write* (repo-path "/containment/go/cmd/d1-localonly") (repo-path "/containment/go/cmd/d1-localonly/main.go")) ; d1-localonly
+(deny file-write* (repo-path "/containment/go/cmd/d1-agent-hook") (repo-path "/containment/go/cmd/d1-agent-hook/main.go")) ; the hook
+(deny file-write* (repo-path "/d1-server") (repo-path "/d1-server/crates") (repo-path "/d1-server/crates/d1-recomp")) ; above the gate call sites
+(deny file-write* (repo-path "/d1-server/crates/d1-recomp/netgate_profile.rs") (repo-path "/d1-server/crates/d1-recomp/build.rs")) ; the C gate's policy, built in
+(deny file-write* (repo-path "/d1-server/crates/d1-recomp/src") (repo-path "/d1-server/crates/d1-recomp/src/main.rs")) ; d1-recomp's gate call
+(deny file-write* (repo-path "/d1-server/crates/d1-oracle") (repo-path "/d1-server/crates/d1-oracle/build.rs")) ; d1-oracle's gate build
+(deny file-write* (repo-path "/d1-server/crates/d1-oracle/src") (repo-path "/d1-server/crates/d1-oracle/src/main.rs")) ; d1-oracle's gate call
+(deny file-write* (repo-path "/d1-server/crates/d1-replay") (repo-path "/d1-server/crates/d1-replay/build.rs")) ; d1-replay's gate build
+(deny file-write* (repo-path "/d1-server/crates/d1-replay/src") (repo-path "/d1-server/crates/d1-replay/src/main.rs")) ; d1-replay's gate call
+(deny file-write* (repo-path "/containment/c/d1testgate.c")) ; the test gate
+(deny file-write* (repo-path "/containment/go/cmd/d1-testgate-header") (repo-path "/containment/go/cmd/d1-testgate-header/main.go")) ; its policy header
+(deny file-write* (repo-path "/tools") (repo-path "/tools/d1") (repo-path "/tools/d1/internal") (repo-path "/tools/d1/internal/testgate")) ; above the Go test gate
+(deny file-write* (repo-path "/tools/d1/internal/testgate/testgate.go") (repo-path "/tools/d1/internal/testgate/testgate_test.go")) ; the Go test gate and its control
+(deny file-write* (repo-path "/containment/go/profiles/orkey.sb")) ; d1-orkey's policy
+(deny file-write* (repo-path "/containment/go/cmd/d1-orkey") (repo-path "/containment/go/cmd/d1-orkey/main.go")) ; d1-orkey
+(deny file-write* (repo-path "/containment/go/orkey") (repo-path "/containment/go/orkey/orkey.go") (repo-path "/containment/go/orkey/controls.go")) ; its forwarder and controls
+(deny file-write* (regex #"\.sb$")) ; no profile can be rewritten, even in temporary space
+(deny file-write* (regex #"^/private/tmp/claude")) ; nor the agent's session state, which it reads back
+; Not in this profile, and why: a literal 127.0.0.1 (Seatbelt refuses it: "host must be * or
+; localhost"), so a bind to 0.0.0.0 or the LAN address is allowed and reachable from the LAN (the
+; macOS firewall is the control); the delegate list is incomplete by nature; Mach denies are not
+; proven per launch (no cgo), the profile tests prove the network and write rules.

@@ -1,0 +1,20 @@
+The Go game server (tools/d1/cmd/d1-srv, built to d1-server/target/release/d1-srv) runs only
+under d1-nonet: it owns the accounts and starts d1-recomp as its child inside the same applied
+game profile. Listing it with the game binaries makes the hook admit
+`d1-nonet <root>/d1-server/target/release/d1-srv ...` for agent test runs, and makes d1-localonly
+and the hook refuse it anywhere else. d1-srv carries no C gate (it is Go, no cgo); it checks its
+own containment at start with the gate's loopback probe and exits 2 if not refused.
+
+Owner applies: git apply containment/proposals/2026-10-18-d1-srv.patch, then reinstall the hook.
+
+--- a/containment/go/gate/local.go
++++ b/containment/go/gate/local.go
+@@ -47,5 +47,6 @@
+ }
+
+-// GameBinaries run game code and carry the C gate, so they run only under d1-nonet.
+-var GameBinaries = []string{"d1-recomp", "d1-oracle", "d1-replay"}
++// GameBinaries run game code (or, d1-srv, start it) and run only under d1-nonet. The Rust three
++// carry the C gate; d1-srv probes its own containment at start.
++var GameBinaries = []string{"d1-recomp", "d1-oracle", "d1-replay", "d1-srv"}
+

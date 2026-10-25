@@ -1,0 +1,70 @@
+Owner edit (hook.go is protected): let d1-nonet run cargo test binaries, so game-code tests run
+inside containment. Apply from the repository root with:  git apply containment/proposals/2026-10-18-test-binaries.patch
+then: cd containment/go && GOCACHE=$PWD/.gocache GOFLAGS=-mod=mod go test -count=1 ./... and reinstall the hook.
+
+--- a/containment/go/hook/hook.go
++++ b/containment/go/hook/hook.go
+@@ -161,13 +161,41 @@
+ 	isGame := slices.Contains(gate.GameBinaries, filepath.Base(words[1]))
+ 	switch {
+-	case words[0] == nonet && (!isGame || words[1] != filepath.Join(config.Root, "d1-server/target/release", filepath.Base(words[1]))):
+-		return "", "sandbox off: d1-nonet runs only a game binary in " + filepath.Join(config.Root, "d1-server/target/release")
++	case words[0] == nonet && !isTestBinary(words[1], config) && (!isGame || words[1] != filepath.Join(config.Root, "d1-server/target/release", filepath.Base(words[1]))):
++		return "", "sandbox off: d1-nonet runs only a game binary in " + filepath.Join(config.Root, "d1-server/target/release") +
++			", or a test binary in " + filepath.Join(config.Root, "d1-server/target/{debug,release}/deps")
+ 	case words[0] == localonly && (isGame || !filepath.IsAbs(words[1])):
+ 		return "", "sandbox off: d1-localonly runs a program named by its absolute path, never a game binary (those run under d1-nonet)"
+ 	}
+ 	return words[0], ""
+ }
+
++// isTestBinary reports whether path is a cargo test binary built in this repository,
++// d1-server/target/{debug,release}/deps/<crate>-<16 hex digits>. Tests that run game code run only
++// under d1-nonet, as the game binaries do (owner, 2026-10-18: "tests are always ran inside
++// containment"). Cargo writes crate names there with "_", so the one "-" is the hash separator.
++func isTestBinary(path string, config Config) bool {
++	directory, name := filepath.Split(path)
++	if directory != filepath.Join(config.Root, "d1-server/target/debug/deps")+"/" &&
++		directory != filepath.Join(config.Root, "d1-server/target/release/deps")+"/" {
++		return false
++	}
++	crate, hash, found := strings.Cut(name, "-")
++	if !found || crate == "" || len(hash) != 16 {
++		return false
++	}
++	for _, character := range crate {
++		if character != '_' && !isAlphanumeric(character) {
++			return false
++		}
++	}
++	for _, character := range hash {
++		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
++			return false
++		}
++	}
++	return true
++}
++
+ // isAlphanumeric reports whether character is an ASCII letter or digit.
+ func isAlphanumeric(character rune) bool {
+ 	return character < 128 && (character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9')
+--- a/containment/go/hook_test.go
++++ b/containment/go/hook_test.go
+@@ -82,5 +82,7 @@
+ 		nonet + " " + release + "d1-recomp run --program /x/emit --seconds 20 --log /x/runs/r1/run.txt",
+ 		"D1_EBOOT=/x/eboot.elf D1_GFX=/x/libd1gfx.dylib " + nonet + " " + release + "d1-oracle --help",
++		nonet + " " + release + "deps/d1_activity_host-60a8a830d1ed6526 --skip pinned --test-threads=1",
++		"D1_EBOOT=/x/eboot.elf " + nonet + " " + config.Root + "/d1-server/target/debug/deps/d1_oracle-0123456789abcdef",
+ 		localonly + " /opt/homebrew/bin/cargo test -p d1-responder",
+ 		localonly + " " + release + "d1-responder --bind 127.0.0.1",
+ 	}
+@@ -112,4 +114,9 @@
+ 		nonet + " " + release + "d1-responder":                                      "runs only a game binary",
+ 		nonet + " /elsewhere/d1-server/target/release/d1-recomp":                    "runs only a game binary",
++		nonet + " " + release + "deps/libd1_oracle-60a8a830d1ed6526.rlib":           "runs only a game binary",
++		nonet + " " + release + "deps/d1_oracle-60a8a830d1ed652":                    "runs only a game binary",
++		nonet + " " + release + "deps/d1_oracle-60A8A830D1ED6526":                   "runs only a game binary",
++		nonet + " " + release + "deps/../deps/d1_oracle-60a8a830d1ed6526":           "runs only a game binary",
++		nonet + " /elsewhere/target/release/deps/d1_oracle-60a8a830d1ed6526":        "runs only a game binary",
+ 		localonly + " " + release + "d1-recomp run":                                 "never a game binary",
+ 		localonly + " cargo test":                                                   "absolute path",

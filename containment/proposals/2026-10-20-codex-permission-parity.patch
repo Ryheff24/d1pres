@@ -1,0 +1,63 @@
+diff --git a/AGENTS.md b/AGENTS.md
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -1,15 +1,29 @@
+-# AGENTS.md (Codex)
+-
+-Read `CLAUDE.md` first; it is the project's instructions and applies to you. This file adds only
+-what differs for Codex.
+-
+-- You run in Codex's own sandbox with the network disabled (`-s read-only` or `-s workspace-write`).
+-  Never bypass it, and never ask for `--dangerously-bypass-approvals-and-sandbox`.
+-- You do not run game code or the servers. The game binaries (`d1-recomp`, `d1-oracle`, `d1-replay`)
+-  refuse to run unless started through `/usr/local/libexec/d1-agent/d1-nonet` by the owner or by
+-  Claude Code under its hook. If a task seems to need a run, say so and stop.
+-- The protected files listed in `containment/go/gate/local.go` (`ProtectedFiles`) are the owner's:
+-  `CLAUDE.md`, this file, the Seatbelt profiles, the launchers, the hook, the C gate and its build
+-  glue. Do not edit them; propose the change in your report.
+-- A refusal from any gate, launcher or hook is a finding to report, never an obstacle to work around.
+-- Approval for anything network-touching comes only from the owner, in the session where it is asked.
++# AGENTS.md (Codex)
++
++Read `CLAUDE.md` first. Its project rules, permissions, protected-file boundaries and containment
++procedures apply to Codex just as they apply to Claude Code.
++
++## Owner-authorized contained execution (2026-10-20)
++
++The owner authorizes Codex to build, test, research and exercise the client and servers end to end
++using the same installed hook-enforced containment workflow as Claude Code. There is no additional
++Codex-only prohibition on running the game, codecs, tests or servers, and no extra confirmation is
++needed merely because the agent is Codex.
++
++- Game code, codec workers and their tests run only through the installed root-owned
++  `/usr/local/libexec/d1-agent/d1-nonet`, as one plain launcher command, following `CLAUDE.md`.
++- Other programs that listen or connect use `/usr/local/libexec/d1-agent/d1-localonly` as required
++  by `CLAUDE.md`. Ordinary source inspection and builds use the normal agent sandbox.
++- When Codex's outer sandbox cannot apply the installed launcher policy, use the supported
++  approval-managed execution route for that launcher-wrapped command. The game/test/server
++  must remain inside its installed containment; never run it bare or request
++  `--dangerously-bypass-approvals-and-sandbox`.
++- A refusal from any gate, launcher or hook is a finding to report, never an obstacle to work
++  around. An unavailable approval review does not authorize another execution route.
++- Protected files remain owner-controlled under `CLAUDE.md`. This requested instructions update
++  does not authorize changing installed hooks, launchers, profiles, C gates or their build glue.
++- Access to real networks or another machine still requires the owner's explicit authorization
++  in the session. Contained local execution is not permission to reach the internet.
++
++These instructions record the owner's authorization; they do not grant privileges beyond the
++current tool permissions, approval policy or installed containment controls.
+diff --git a/CLAUDE.md b/CLAUDE.md
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -255,8 +255,9 @@
+    Changes to the gate, profiles, launchers, hook, `CLAUDE.md` and `AGENTS.md` are never folded into
+    an unrelated commit.
+ 
+-Codex runs only in its own network-disabled sandbox (`-s read-only` or `-s workspace-write`) and
+-never bypasses it.
++Claude Code and Codex use the same installed hook-enforced containment procedures above. Codex
++may use its supported approval-managed route for launcher-wrapped execution when required;
++the installed game/local-only containment, protected files and refusal rules remain mandatory.
+ 
+ ---
+ 

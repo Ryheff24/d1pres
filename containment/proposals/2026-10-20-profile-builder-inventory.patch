@@ -1,0 +1,12 @@
+--- a/d1-server/crates/d1-oracle/src/main.rs
++++ b/d1-server/crates/d1-oracle/src/main.rs
+@@ -1165,1 +1165,9 @@
++            // Backpack ownership is independent of the explicit equipped-list policy.
++            if !*no_content_indices && (*no_equip || !equip.is_empty()) {
++                let dir = std::path::Path::new(inventory);
++                if dir.exists() {
++                    item_slots = profile::backpack_slots(dir, table.as_ref().expect("content index table"))?;
++                }
++            }
++
+             let progs: Vec<Progression> = progressions

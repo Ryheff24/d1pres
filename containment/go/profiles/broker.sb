@@ -1,0 +1,13 @@
+(version 1)
+; Filesystem and other non-network operations are outside this piece's scope.
+(allow default)
+; T6: no network access unless admitted by the following rules.
+(deny network*)
+; The broker may bind, accept, and exchange data on its parameterized Unix socket.
+(allow network* (literal (param "BROKER_SOCKET")))
+; T6: localhost means this Mac, including its LAN IP, not just 127.0.0.1.
+(allow network-outbound (remote ip "localhost:*"))
+; Only this Mac may be the peer sending traffic to the broker.
+(allow network-inbound (remote ip "localhost:*"))
+; Bind locally; this permission does not grant outbound or inbound traffic.
+(allow network-bind (local ip "localhost:*"))

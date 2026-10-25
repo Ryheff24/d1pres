@@ -1,0 +1,41 @@
+(version 1)
+; The one game policy, one rule per line. d1-nonet embeds this file; the three build.rs and
+; fntest.rs generate the C gate's D1_NETGATE_PROFILE from it (netguard-requirements.md, point 4).
+; Everything not denied below stays allowed; later rules win over earlier ones.
+(allow default) ; the game, clang and the tools run; the rules below remove what reaches out
+(deny network*) ; T1, T9: no socket reaches anything, loopback and this Mac's LAN address included
+(deny socket-option-set) ; T14: no socket options; a multicast join sends IGMP even under the line above
+(deny mach-lookup (global-name "com.apple.nsurlsessiond")) ; T4: URL downloads done by a daemon
+(deny mach-lookup (global-name "com.apple.nsurlstoraged")) ; T4: the URL daemon's storage side
+(deny mach-lookup (global-name "com.apple.dnssd.service")) ; T3: DNS service discovery
+(deny mach-lookup (global-name "com.apple.mDNSResponder")) ; T3: the system resolver
+(deny mach-lookup (global-name "com.apple.lsd.mapdb")) ; T4: LaunchServices database
+(deny mach-lookup (global-name "com.apple.lsd.modifydb")) ; T4: LaunchServices database changes
+(deny mach-lookup (global-name "com.apple.lsd.open")) ; T4: LaunchServices opening a URL or file
+(deny mach-lookup (global-name "com.apple.coreservices.quarantine-resolver")) ; T4: the launch fallback LaunchServices takes when the four names above are denied; without this line an app launch and a document open still succeed (measured 2026-10-17, reviews/REVIEW-claude-launchservices-2026-10-17.md)
+(deny mach-lookup (global-name "com.apple.coreservices.appleevents")) ; T4: scripting other apps
+(deny mach-lookup (global-name "com.apple.networkd")) ; T4, T12: the network daemon
+(deny mach-lookup (global-name "com.apple.networkd_privileged")) ; T4, T12: its privileged side
+(deny mach-lookup (global-name "com.apple.nehelper")) ; T4, T12: network extensions and VPN
+(deny process-exec (literal "/usr/bin/open")) ; T4: open hands a URL or app to LaunchServices
+(deny process-exec (literal "/usr/bin/osascript")) ; T4: AppleScript drives unsandboxed apps
+(deny job-creation) ; T4: a launchd job would run outside this sandbox
+(deny file-write*) ; no T row (GPT review 2026-10-16, findings 3, 6): plant nothing run later
+(allow file-write* (subpath "/private/tmp")) ; temporary space
+(allow file-write* (subpath "/private/var/folders")) ; per-user temporary space
+(allow file-write* (subpath (string-append (param "REPO") "/runs"))) ; run output; REPO from the launcher
+(allow file-write* (literal "/dev/null")) ; device every process writes
+(allow file-write* (literal "/dev/tty")) ; the terminal
+(allow file-write* (literal "/dev/dtracehelper")) ; opened by the dynamic loader
+(deny file-write* (regex #"\.sb$")) ; no profile can be rewritten, even in temporary space
+(deny file-write* (regex #"^/private/tmp/claude")) ; nor the agent's session state, which it reads back
+; The socket denies are proven by the resolver tests. Every global-name in this file must be in
+; the C gate's probe list (netgate_delegates); the gate refuses when the two counts differ.
+(deny mach-lookup (global-name "com.apple.system.opendirectoryd.membership")) ; T3: user lookups
+(deny mach-lookup (global-name "com.apple.SystemConfiguration.configd")) ; T4: network configuration
+(deny network* (literal "/var/run/mDNSResponder")) ; T3: the resolver's socket, kept explicit
+(deny network* (literal "/private/var/run/mDNSResponder")) ; T3: the same socket, resolved path
+; Deferred until the recompiled game is the only program run under this profile (d1-recomp
+; still spawns clang): (deny process-exec) with only the game allowed (T2), and (deny
+; mach-lookup) with an allowlist (T12). The broker socket allowance is gone for good: the
+; broker's control channel is an inherited descriptor (netguard-requirements.md, Composition).

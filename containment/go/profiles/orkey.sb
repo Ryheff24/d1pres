@@ -1,0 +1,23 @@
+(version 1)
+; d1-orkey's policy, one rule per line. d1-orkey embeds this file and applies it after
+; gate.NormalizeWith puts in its own resolved path for SELF. The helper holds the owner's OpenRouter
+; key; this profile keeps what it can do to listening on 127.0.0.1:8790, TCP to port 443 (the code
+; admits only openrouter.ai:443 by name, then TLS checks the certificate), and name lookups.
+; Seatbelt cannot name a remote host other than * or localhost, so the host rule lives in the code
+; (orkey.Guard) and this file bounds the rest. Everything not denied stays allowed; later rules win.
+(allow default) ; the Go runtime, TLS trust evaluation (trustd) and the resolver run
+(deny network*) ; nothing reaches the network unless a rule below admits it
+(allow network-outbound (remote tcp "*:443")) ; HTTPS out; UDP 443 (QUIC) stays denied
+(allow network-outbound (literal "/private/var/run/mDNSResponder") (literal "/var/run/mDNSResponder")) ; libSystem name lookups
+(allow network-bind network-inbound (local tcp "localhost:8790")) ; the one listen address; the code binds 127.0.0.1 only
+(deny mach-lookup (global-name "com.apple.nsurlsessiond") (global-name "com.apple.nsurlstoraged")) ; URL downloads done by a daemon
+(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.lsd.mapdb")) ; launching apps
+(deny mach-lookup (global-name "com.apple.lsd.modifydb") (global-name "com.apple.lsd.open")) ; LaunchServices opening a URL or file
+(deny mach-lookup (global-name "com.apple.coreservices.quarantine-resolver")) ; the launch fallback (reviews/REVIEW-claude-launchservices-2026-10-17.md)
+(deny mach-lookup (global-name "com.apple.coreservices.appleevents")) ; scripting other apps
+(deny mach-lookup (global-name "com.apple.networkd_privileged") (global-name "com.apple.nehelper")) ; privileged network setup and VPN
+(deny process-exec*) ; it runs nothing
+(allow process-exec (literal (param "SELF"))) ; except itself, which sandbox-exec starts under this profile
+(deny job-creation) ; a launchd job would run outside this sandbox
+(deny file-write*) ; it writes no file: the key can land in none
+(allow file-write* (literal "/dev/null")) ; the one device it writes
