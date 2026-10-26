@@ -23,6 +23,7 @@ var ProtectedFiles = []string{
 	"d1-server/.cargo/config.toml",
 	"containment/agent-containment.md",
 	"containment/install.sh",
+	"containment/update.sh",
 	"containment/c/d1netgate.c",
 	"containment/go/profile.go",
 	"containment/go/profiles/game.sb",

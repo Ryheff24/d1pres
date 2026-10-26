@@ -141,6 +141,21 @@ the servers or game binaries.
 
 In your own terminal, outside any sandbox. Nothing here is run by an agent.
 
+**Where it lives (owner, 2026-10-25).** `containment/` and `CLAUDE.md` are kept in
+github.com/Ryheff24/d1pres and change only by a pull request there. d1preservation's git ignores
+both. After you merge one, run:
+
+```sh
+bash /Users/ryanheffernan/Documents/projects/d1preservation/containment/update.sh
+```
+`containment/update.sh` (protected, like `install.sh`) clones main fresh into a folder in your home
+that no agent or contained program can write. It lists the files here that differ from main and
+overwrites them with main's. It stops before writing anything if `containment/go` or
+`containment/c` holds a file main lacks, because the build would use it. Then it runs the new
+`install.sh`. With `check` it only reports. Its log is `runs/containment-update-*.log`.
+
+`install.sh` alone installs what is already checked out:
+
 ```sh
 bash /Users/ryanheffernan/Documents/projects/d1preservation/containment/install.sh
 ```
@@ -189,14 +204,10 @@ window is not a switch, it is a hand-off:
    scratchpad's `window/` directory (for example `window/CLAUDE.md`,
    `window/containment/go/hook/protect.go`), and tells the owner the directory's absolute path and
    what changed in each file.
-2. The owner reads the diff and copies the tree into place, then commits:
-   ```sh
-   cd /Users/ryanheffernan/Documents/projects/d1preservation
-   diff -ru . <window dir> 2>/dev/null | grep -v "^Only in" | head -200   # read it
-   cp -R <window dir>/. .
-   git add -A . && git commit -m "owner: protected files from the agent's window"
-   ```
-3. If the hook, a launcher, a profile or the C gate changed, run `containment/install.sh` again (it
+2. The changes go to github.com/Ryheff24/d1pres as a pull request, from the owner's clone
+   `/Users/ryanheffernan/Documents/projects/d1remote`, by a script the agent writes and the owner
+   runs. The owner reviews and merges it there.
+3. The owner runs `containment/update.sh`, which checks main out here and runs `install.sh` (it
    runs the controls, rebuilds, reinstalls root-owned and ends with `check`).
 
 `sudo chmod 000 /usr/local/libexec/d1-agent/d1-agent-hook` disables only the hook's own refusals

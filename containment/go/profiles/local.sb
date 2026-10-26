@@ -42,6 +42,7 @@
 (deny file-write* (repo-path "/.cargo") (repo-path "/.cargo/config.toml")) ; cargo configuration for the owner's builds
 (deny file-write* (repo-path "/d1-server/.cargo") (repo-path "/d1-server/.cargo/config.toml")) ; the same for the workspace
 (deny file-write* (repo-path "/containment") (repo-path "/containment/agent-containment.md") (repo-path "/containment/install.sh")) ; the procedure and the owner's install script
+(deny file-write* (repo-path "/containment/update.sh")) ; the owner's update from GitHub, which runs install.sh
 (deny file-write* (repo-path "/containment/c") (repo-path "/containment/c/d1netgate.c")) ; the C gate
 (deny file-write* (repo-path "/containment/go") (repo-path "/containment/go/profile.go")) ; the Go module and its embedded policies
 (deny file-write* (repo-path "/containment/go/profiles") (repo-path "/containment/go/profiles/game.sb") (repo-path "/containment/go/profiles/local.sb")) ; the policies
