@@ -151,6 +151,10 @@ var elevatedGrants = map[string]grant{
 	"leaks":   {"/usr/bin/leaks", true, []string{"--outputGraph", "--atExit", "--"}},
 	"vmmap":   {"/usr/bin/vmmap", true, nil},
 	"heap":    {"/usr/bin/heap", true, nil},
+	// system state (cores, memory, swap, thermal and power): read only (systemForm)
+	"sysctl":          {"/usr/sbin/sysctl", true, nil},
+	"pmset":           {"/usr/bin/pmset", true, nil},
+	"memory_pressure": {"/usr/bin/memory_pressure", true, nil},
 	// stopping this project's processes (killForm)
 	"kill":    {"/bin/kill", false, nil},
 	"pkill":   {"/usr/bin/pkill", false, nil},
@@ -167,8 +171,9 @@ var pipeReaders = map[string]string{"grep": "/usr/bin/grep", "head": "/usr/bin/h
 // alone, or an inspector piped into readers, under these rules: no shell syntax that could start
 // another command, expand a variable or write a file; every program at its accepted path; an
 // inspector without its writing options; nettop and top only in logging mode (-l or -L), so they end;
-// kill, pkill and killall only at this project's processes (projectProcess); code only on this
-// repository's files (codeForm). cwd resolves code's relative paths.
+// sysctl, pmset and memory_pressure only reading (systemForm); kill, pkill and killall only at this
+// project's processes (projectProcess); code only on this repository's files (codeForm). cwd
+// resolves code's relative paths.
 func ElevatedForm(command string, cwd string, config Config) string {
 	segments, why := splitPlain(command)
 	if why != "" {
@@ -211,10 +216,43 @@ func ElevatedForm(command string, cwd string, config Config) string {
 		}) {
 			return "sandbox off (elevated): " + tool + " runs only in logging mode (-l N), which ends; interactive mode never returns"
 		}
+	case "sysctl", "pmset", "memory_pressure":
+		return systemForm(tool, arguments)
 	case "kill", "pkill", "killall":
 		return killForm(tool, arguments, config)
 	case "code":
 		return codeForm(arguments, cwd, config)
+	}
+	return ""
+}
+
+// sysctlOptions are the sysctl options admitted, each spelled alone: they only choose what is
+// printed and how. -w sets a value, as does any name=value argument.
+var sysctlOptions = []string{"-a", "-A", "-b", "-d", "-e", "-h", "-i", "-N", "-n", "-o", "-q", "-x", "-X"}
+
+// systemForm admits the system-state readers only when they read: sysctl with sysctlOptions and
+// names, never name=value; pmset as pmset -g [TYPE], since every other form changes power settings
+// or sleeps the Mac; memory_pressure alone or with -Q, since its other options allocate memory to
+// simulate pressure.
+func systemForm(tool string, arguments []string) string {
+	switch tool {
+	case "sysctl":
+		for _, argument := range arguments {
+			if strings.Contains(argument, "=") {
+				return "sandbox off (elevated): sysctl " + argument + " sets a value; sysctl only reads here"
+			}
+			if strings.HasPrefix(argument, "-") && !slices.Contains(sysctlOptions, argument) {
+				return "sandbox off (elevated): sysctl " + argument + " is not admitted; sysctl only reads here, with " + strings.Join(sysctlOptions, ", ") + " each spelled alone"
+			}
+		}
+	case "pmset":
+		if len(arguments) == 0 || arguments[0] != "-g" || len(arguments) > 2 || len(arguments) == 2 && strings.HasPrefix(arguments[1], "-") {
+			return "sandbox off (elevated): pmset only reads here, as pmset -g [TYPE]; every other form changes power settings"
+		}
+	case "memory_pressure":
+		if len(arguments) > 1 || len(arguments) == 1 && arguments[0] != "-Q" {
+			return "sandbox off (elevated): memory_pressure runs alone or with -Q; its other options allocate memory to simulate pressure"
+		}
 	}
 	return ""
 }
