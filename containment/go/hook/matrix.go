@@ -46,6 +46,8 @@ var AccessMatrix = []Row{
 		"xcrunForm (shell.go)"},
 	{"Inspecting processes, memory and network: ps, pgrep, lsof, nettop, top, vm_stat, sample, leaks, vmmap, heap", "yes: sandbox off, alone or piped into grep, head, tail, wc; no writing options; nettop and top only with -l", "no",
 		"ElevatedForm, elevatedGrants (elevated.go)"},
+	{"Reading system state: sysctl, pmset, memory_pressure", "yes: sandbox off, alone or piped into grep, head, tail, wc; sysctl without -w or name=value; pmset -g only; memory_pressure alone or -Q", "no",
+		"systemForm (elevated.go)"},
 	{"Stopping processes: kill, pkill, killall", "yes: sandbox off, this project's processes only", "no",
 		"killForm, projectProcess (elevated.go)"},
 	{"Opening files in VS Code: code", "yes: sandbox off, -r or -g, up to 20 existing files in this repository; no folders, workspaces, .vscode, .git", "no",
