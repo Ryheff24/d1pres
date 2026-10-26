@@ -15,9 +15,10 @@ import (
 
 // ElevatedModels are the models whose sessions may run the elevated tools with the sandbox off
 // (owner, 2026-10-25: "gpt sol 6.1, gpt 6 astra, claude 5.5, fable 5.1 - elevated; everything else -
-// current limit"). Exact model ids as the harness records them; a provider-prefixed id
-// (anthropic/claude-opus-5-5 through OpenRouter) is not one of them.
-var ElevatedModels = []string{"gpt-6.1-sol", "gpt-6-astra", "claude-opus-5-5", "claude-fable-5-1"}
+// current limit"; the same day, on the PR: every Claude 5.5 model, not only Opus). Exact model ids
+// as the harness records them; a provider-prefixed id (anthropic/claude-opus-5-5 through
+// OpenRouter) is not one of them. The access control matrix (matrix.go) is the summary.
+var ElevatedModels = []string{"gpt-6.1-sol", "gpt-6-astra", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"}
 
 // anthropicAPI is the only base URL an elevated Claude Code session talks to. A session started
 // with ANTHROPIC_BASE_URL set to anything else (ori, OpenRouter, a local proxy) stays at the current
@@ -125,34 +126,42 @@ func transcriptModel(path string) string {
 	return ""
 }
 
-// elevatedTools are the programs an elevated session may run with the sandbox off, each at the one
-// path the hook accepts for it (a bare name must resolve there on the hook's PATH, so a program
-// planted earlier on PATH under the same name is refused).
-var elevatedTools = map[string]string{
+// grant is one program an elevated session may run with the sandbox off: the one path the hook
+// accepts for it (a bare name must resolve there on the hook's PATH, so a program planted earlier
+// on PATH under the same name is refused), whether it only inspects (its output may then be piped
+// into pipeReaders), and the options refused because they write a file, open an app or start a
+// program.
+type grant struct {
+	path    string
+	inspect bool
+	writing []string
+}
+
+// elevatedGrants are the elevated tools, one table; the access control matrix (matrix.go) shows
+// them by row. sample -e opens TextEdit; leaks --atExit and anything after "--" run a program.
+var elevatedGrants = map[string]grant{
 	// processes, memory and network: they only read
-	"ps": "/bin/ps", "pgrep": "/usr/bin/pgrep", "lsof": "/usr/sbin/lsof", "nettop": "/usr/bin/nettop",
-	"top": "/usr/bin/top", "vm_stat": "/usr/bin/vm_stat", "sample": "/usr/bin/sample",
-	"leaks": "/usr/bin/leaks", "vmmap": "/usr/bin/vmmap", "heap": "/usr/bin/heap",
-	// stopping this project's processes
-	"kill": "/bin/kill", "pkill": "/usr/bin/pkill", "killall": "/usr/bin/killall",
-	// opening this repository's files in the owner's VS Code
-	"code": "/usr/local/bin/code",
+	"ps":      {"/bin/ps", true, nil},
+	"pgrep":   {"/usr/bin/pgrep", true, nil},
+	"lsof":    {"/usr/sbin/lsof", true, nil},
+	"nettop":  {"/usr/bin/nettop", true, nil},
+	"top":     {"/usr/bin/top", true, nil},
+	"vm_stat": {"/usr/bin/vm_stat", true, nil},
+	"sample":  {"/usr/bin/sample", true, []string{"-file", "-e"}},
+	"leaks":   {"/usr/bin/leaks", true, []string{"--outputGraph", "--atExit", "--"}},
+	"vmmap":   {"/usr/bin/vmmap", true, nil},
+	"heap":    {"/usr/bin/heap", true, nil},
+	// stopping this project's processes (killForm)
+	"kill":    {"/bin/kill", false, nil},
+	"pkill":   {"/usr/bin/pkill", false, nil},
+	"killall": {"/usr/bin/killall", false, nil},
+	// opening this repository's files in the owner's VS Code (codeForm)
+	"code": {"/usr/local/bin/code", false, nil},
 }
 
 // pipeReaders may follow an inspecting tool after "|". uniq and sort are left out: both can write a
 // file named as an argument.
 var pipeReaders = map[string]string{"grep": "/usr/bin/grep", "head": "/usr/bin/head", "tail": "/usr/bin/tail", "wc": "/usr/bin/wc"}
-
-// inspectors are the elevated tools whose output may be piped into pipeReaders.
-var inspectors = []string{"ps", "pgrep", "lsof", "nettop", "top", "vm_stat", "sample", "leaks", "vmmap", "heap"}
-
-// writingOptions are the options that make an inspector write a file, open an app or start a
-// program: sample -file and -e (opens TextEdit), leaks --outputGraph and --atExit (runs a program),
-// and "--", after which leaks runs a program.
-var writingOptions = map[string][]string{
-	"sample": {"-file", "-e"},
-	"leaks":  {"--outputGraph", "--atExit", "--"},
-}
 
 // ElevatedForm returns "" when an elevated session's sandbox-off command is one elevated tool run
 // alone, or an inspector piped into readers, under these rules: no shell syntax that could start
@@ -167,13 +176,14 @@ func ElevatedForm(command string, cwd string, config Config) string {
 	}
 	first := segments[0]
 	tool := filepath.Base(first[0])
-	if _, known := elevatedTools[tool]; !known {
-		return "sandbox off (elevated): " + first[0] + " is neither a launcher nor an elevated tool (" + strings.Join(sortedKeys(elevatedTools), ", ") + ")"
+	granted, known := elevatedGrants[tool]
+	if !known {
+		return "sandbox off (elevated): " + first[0] + " is neither a launcher nor an elevated tool (" + strings.Join(sortedKeys(elevatedGrants), ", ") + ")"
 	}
-	if why := acceptedPath(first[0], elevatedTools[tool]); why != "" {
+	if why := acceptedPath(first[0], granted.path); why != "" {
 		return "sandbox off (elevated): " + why
 	}
-	if len(segments) > 1 && !slices.Contains(inspectors, tool) {
+	if len(segments) > 1 && !granted.inspect {
 		return "sandbox off (elevated): only an inspecting tool's output may be piped, not " + tool + "'s"
 	}
 	for _, segment := range segments[1:] {
@@ -188,7 +198,7 @@ func ElevatedForm(command string, cwd string, config Config) string {
 	}
 	arguments := first[1:]
 	for _, argument := range arguments {
-		for _, option := range writingOptions[tool] {
+		for _, option := range granted.writing {
 			if argument == option || strings.HasPrefix(argument, option+"=") {
 				return "sandbox off (elevated): " + tool + " " + option + " writes a file, opens an app or starts a program"
 			}
@@ -196,7 +206,9 @@ func ElevatedForm(command string, cwd string, config Config) string {
 	}
 	switch tool {
 	case "nettop", "top":
-		if !slices.ContainsFunc(arguments, func(argument string) bool { return strings.HasPrefix(argument, "-l") || strings.HasPrefix(argument, "-L") }) {
+		if !slices.ContainsFunc(arguments, func(argument string) bool {
+			return strings.HasPrefix(argument, "-l") || strings.HasPrefix(argument, "-L")
+		}) {
 			return "sandbox off (elevated): " + tool + " runs only in logging mode (-l N), which ends; interactive mode never returns"
 		}
 	case "kill", "pkill", "killall":
@@ -503,7 +515,7 @@ func stripLine(argument string) string {
 }
 
 // sortedKeys is a map's keys in order, for refusals that list them.
-func sortedKeys(table map[string]string) []string {
+func sortedKeys[V any](table map[string]V) []string {
 	keys := make([]string, 0, len(table))
 	for key := range table {
 		keys = append(keys, key)

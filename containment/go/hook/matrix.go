@@ -1,0 +1,71 @@
+package hook
+
+import "strings"
+
+// Row is one line of the access control matrix: a capability, what a session on one of
+// ElevatedModels gets, what a session on any other model gets ("no", or "yes" and its limits), and
+// the code that enforces it. TestAccessMatrix runs probes of every row through Decide for both kinds
+// of session, and checks that agent-containment.md shows exactly MatrixTable().
+type Row struct {
+	Capability string
+	Elevated   string
+	Other      string
+	Enforced   string
+}
+
+// suiteTested marks the rows the hook does not decide: the launchers' profiles enforce them, and
+// the containment suite (containment/go, run by install.sh) tests them.
+const suiteTested = "the containment suite tests them"
+
+// AccessMatrix is who gets what, from the hook's side (owner, 2026-10-25: "an access control matrix
+// would solve most of the who gets what permissions confusions"). The rows hold for sessions working
+// in, inside or above this repository; a session elsewhere meets only the game-code row. The owner,
+// in their own terminal, is outside the hook.
+var AccessMatrix = []Row{
+	{"Bash inside the sandbox", "yes: the sandbox's own limits", "yes: the sandbox's own limits",
+		"Claude Code's sandbox; the hook passes it"},
+	{"Bash that names a protected file", "yes: pure reads only", "yes: pure reads only",
+		"Tripwire (protect.go)"},
+	{"Edit, Write or apply_patch of a protected file (gate.ProtectedFiles, ~/.claude/settings.json)", "no", "no",
+		"ProtectedTarget (protect.go)"},
+	{"Edit, Write or apply_patch of the session records (~/.claude/projects except each memory/, ~/.codex/sessions)", "no", "no",
+		"RecordsTarget (elevated.go)"},
+	{"Game code: d1-recomp, d1-oracle, d1-replay, d1-srv", "yes: only as d1-nonet's program, sandbox off", "yes: only as d1-nonet's program, sandbox off",
+		"decideBash, LauncherForm (hook.go)"},
+	{"Running tests (cargo and Go test binaries)", "yes: only under d1-nonet", "yes: only under d1-nonet",
+		"LauncherForm (hook.go); the test gate in each binary"},
+	{"Servers and other programs that listen", "yes: only under d1-localonly, sandbox off, never a game binary or a test", "yes: only under d1-localonly, sandbox off, never a game binary or a test",
+		"LauncherForm (hook.go)"},
+	{"Codex through the plugin's companion script", "yes: setup, task, status, result, cancel, alone; no reviews", "yes: setup, task, status, result, cancel, alone; no reviews",
+		"CompanionForm (shell.go)"},
+	{"The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, log show and stream, codex exec, copilot -p", "yes: alone; copilot only with an --allow-tool list", "no",
+		"decideBash (hook.go), ExcludedForm (shell.go)"},
+	{"security (also sandbox-excluded)", "yes: find-identity only", "no",
+		"ExcludedForm (shell.go)"},
+	{"xcrun (also sandbox-excluded)", "yes: SDK queries; simctl, devicectl, xctrace without --launch", "no",
+		"xcrunForm (shell.go)"},
+	{"Inspecting processes, memory and network: ps, pgrep, lsof, nettop, top, vm_stat, sample, leaks, vmmap, heap", "yes: sandbox off, alone or piped into grep, head, tail, wc; no writing options; nettop and top only with -l", "no",
+		"ElevatedForm, elevatedGrants (elevated.go)"},
+	{"Stopping processes: kill, pkill, killall", "yes: sandbox off, this project's processes only", "no",
+		"killForm, projectProcess (elevated.go)"},
+	{"Opening files in VS Code: code", "yes: sandbox off, -r or -g, up to 20 existing files in this repository; no folders, workspaces, .vscode, .git", "no",
+		"codeForm (elevated.go)"},
+	{"Anything else with the sandbox off", "no", "no",
+		"LauncherForm (hook.go), ElevatedForm (elevated.go)"},
+	{"Network from game code and from servers", "game code none; servers this Mac only", "game code none; servers this Mac only",
+		"game.sb, local.sb and the C gate; " + suiteTested},
+}
+
+// MatrixTable is AccessMatrix as the Markdown agent-containment.md shows.
+func MatrixTable() string {
+	lines := []string{
+		"Elevated models: `" + strings.Join(ElevatedModels, "`, `") + "`. Every other model, Claude Code subagents included (each by its own model), is the second column.",
+		"",
+		"| capability | elevated models | every other model | enforced by |",
+		"|---|---|---|---|",
+	}
+	for _, row := range AccessMatrix {
+		lines = append(lines, "| "+strings.Join([]string{row.Capability, row.Elevated, row.Other, row.Enforced}, " | ")+" |")
+	}
+	return strings.Join(lines, "\n") + "\n"
+}

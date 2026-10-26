@@ -101,11 +101,12 @@ func Decide(raw []byte, projectDirectory string, config Config) string {
 }
 
 // decideBash: a game binary named without the launcher is refused from any session. In sessions
-// in, inside or above this repository, a command naming one of the owner's excluded programs must
-// be that command alone, and then skips the tripwire (the program runs outside the sandbox by the
-// owner's choice, and a heredoc body is its data: codex prompts name protected files); any other
-// command naming a protected file must be a pure read (Tripwire), and a call with the sandbox off
-// must be the launcher form, or, from an elevated model's session, an elevated tool (ElevatedForm).
+// in, inside or above this repository, a command naming one of the owner's excluded programs is
+// for elevated models only and must be that command alone, and then skips the tripwire (the
+// program runs outside the sandbox by the owner's choice, and a heredoc body is its data: codex
+// prompts name protected files); any other command naming a protected file must be a pure read
+// (Tripwire), and a call with the sandbox off must be the launcher form, or, from an elevated
+// model's session, an elevated tool (ElevatedForm). matrix.go sums these rules up by row.
 func decideBash(call event, input toolInput, directories []string, config Config) string {
 	if input.Command == nil {
 		return "Bash: no command string in the event"
@@ -122,7 +123,10 @@ func decideBash(call event, input toolInput, directories []string, config Config
 	if isCompanion(code) {
 		return CompanionForm(command)
 	}
-	if firstWordMatching(code, isExcludedName) != "" {
+	if excluded := firstWordMatching(code, isExcludedName); excluded != "" {
+		if elevated, because := Elevated(call, config); !elevated {
+			return "the owner's settings run " + filepath.Base(excluded) + " outside the sandbox, which only elevated models may do, and " + because + " (containment/agent-containment.md, Access control matrix)"
+		}
 		return ExcludedForm(command)
 	}
 	override := overridesTestGate(code)
@@ -146,14 +150,14 @@ func decideBash(call event, input toolInput, directories []string, config Config
 	}
 	elevated, because := Elevated(call, config)
 	if !elevated {
-		return why + "; " + words[0] + " is an elevated tool, and " + because
+		return why + "; " + words[0] + " is an elevated tool, and " + because + " (containment/agent-containment.md, Access control matrix)"
 	}
 	return ElevatedForm(command, call.Cwd, config)
 }
 
-// isElevatedToolWord reports whether word names one of elevatedTools, by name or path.
+// isElevatedToolWord reports whether word names one of elevatedGrants, by name or path.
 func isElevatedToolWord(word string) bool {
-	_, known := elevatedTools[filepath.Base(word)]
+	_, known := elevatedGrants[filepath.Base(word)]
 	return known
 }
 

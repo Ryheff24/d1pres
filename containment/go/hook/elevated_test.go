@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
 )
 
 // These tests live in package hook, not with the containment suite in containment/go, so their
@@ -123,6 +122,8 @@ func TestHookElevatedModel(t *testing.T) {
 		assistant("deepseek/deepseek-v4.1-flash-1017"),
 		`{"type":"user","message":{"role":"user","content":"{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5-5\"}}"}}`)
 	writeTranscript(t, config, "opus/subagents/agent-ahaiku-1.jsonl", assistant("claude-haiku-5-5"))
+	writeTranscript(t, config, "opus/subagents/agent-aold-1.jsonl", assistant("claude-haiku-4-5"))
+	sonnet := writeTranscript(t, config, "sonnet.jsonl", assistant("claude-sonnet-5-5"))
 	routed := writeTranscript(t, config, "routed.jsonl", assistant("anthropic/claude-opus-5-5"))
 	outsideRecords := filepath.Join(config.Root, "fake.jsonl")
 	if err := os.WriteFile(outsideRecords, []byte(assistant("claude-opus-5-5")+"\n"), 0o644); err != nil {
@@ -140,7 +141,9 @@ func TestHookElevatedModel(t *testing.T) {
 		{"opus session", opus, "", "", "", true},
 		{"opus session, Anthropic named", opus, "", "", "https://api.anthropic.com/", true},
 		{"opus session through another provider", opus, "", "", "https://openrouter.ai/api", false},
-		{"haiku subagent of the opus session", opus, "ahaiku-1", "", "", false},
+		{"haiku 5.5 subagent of the opus session", opus, "ahaiku-1", "", "", true},
+		{"haiku 4.5 subagent of the opus session", opus, "aold-1", "", "", false},
+		{"sonnet 5.5 session", sonnet, "", "", "", true},
 		{"subagent id with a path in it", opus, "../x", "", "", false},
 		{"missing subagent record", opus, "nobody", "", "", false},
 		{"deepseek session quoting an opus record", deepseek, "", "", "", false},
@@ -307,9 +310,10 @@ func TestHookElevatedForm(t *testing.T) {
 			t.Errorf("%q with only the repository's process running: got %q", command, why)
 		}
 	}
-	// Control: a limited session is refused every one of them, and the launcher rule still applies.
+	// Control: a limited session is refused every one of them, the owner's sandbox-excluded programs
+	// included, and the launcher rule still applies.
 	deepseek := writeTranscript(t, config, "deepseek.jsonl", assistant("deepseek/deepseek-v4.1-flash-1017"))
-	for _, command := range []string{"ps aux", "kill " + ours, "code -r " + notes} {
+	for _, command := range []string{"ps aux", "kill " + ours, "code -r " + notes, "xcrun --show-sdk-path", "security find-identity", "codex exec x", "xcodebuild -version"} {
 		why := Decide(sessionEvent(t, command, config.Root, deepseek, "", ""), config.Root, config)
 		if !strings.Contains(why, "deepseek/deepseek-v4.1-flash-1017 has the current limits") {
 			t.Errorf("limited session %q: got %q", command, why)
@@ -325,10 +329,10 @@ func TestHookRecordEdits(t *testing.T) {
 	cases := map[string]string{
 		transcript: "session records",
 		filepath.Join(config.Home, ".claude", "projects", "repo", "s", "subagents", "agent-a.jsonl"): "session records",
-		filepath.Join(config.Home, ".claude", "projects", "repo", "new.jsonl"):                     "session records",
-		filepath.Join(config.Home, ".codex", "sessions", "2026", "rollout.jsonl"):                   "session records",
-		filepath.Join(config.Home, ".claude", "projects", "repo", "memory", "fact.md"):             "",
-		filepath.Join(config.Root, "notes.md"):                                                      "",
+		filepath.Join(config.Home, ".claude", "projects", "repo", "new.jsonl"):                       "session records",
+		filepath.Join(config.Home, ".codex", "sessions", "2026", "rollout.jsonl"):                    "session records",
+		filepath.Join(config.Home, ".claude", "projects", "repo", "memory", "fact.md"):               "",
+		filepath.Join(config.Root, "notes.md"):                                                       "",
 	}
 	writeTree(t, config.Home, []string{".codex/sessions/2026/keep"})
 	for path, reason := range cases {
@@ -345,27 +349,33 @@ func TestHookRecordEdits(t *testing.T) {
 	}
 }
 
-// TestHookXcrun: outside the sandbox xcrun only queries the SDK or starts simctl, devicectl and
-// xctrace, and xctrace never launches a program.
+// TestHookXcrun: xcrun is for elevated sessions only, and then only queries the SDK or starts
+// simctl, devicectl and xctrace, and xctrace never launches a program. Control: a limited session is
+// refused even the queries.
 func TestHookXcrun(t *testing.T) {
 	config := fakeTree(t)
+	opus := writeTranscript(t, config, "opus.jsonl", assistant("claude-opus-5-5"))
+	deepseek := writeTranscript(t, config, "deepseek.jsonl", assistant("deepseek/deepseek-v4.1-flash-1017"))
+	if why := Decide(sessionBash(t, "xcrun --show-sdk-path", false, config.Root, deepseek), config.Root, config); !strings.Contains(why, "only elevated models") {
+		t.Errorf("xcrun --show-sdk-path from a limited session: got %q", why)
+	}
 	cases := map[string]string{
-		"xcrun --show-sdk-path":                              "",
-		"xcrun --sdk macosx --show-sdk-path":                 "",
-		"xcrun -f clang":                                     "",
-		"xcrun simctl list":                                  "",
-		"xcrun devicectl list devices":                       "",
+		"xcrun --show-sdk-path":              "",
+		"xcrun --sdk macosx --show-sdk-path": "",
+		"xcrun -f clang":                     "",
+		"xcrun simctl list":                  "",
+		"xcrun devicectl list devices":       "",
 		"xcrun xctrace record --template 'Time Profiler' --attach 123 --time-limit 10s": "",
-		"xcrun xctrace record --launch -- /bin/sh":          "xctrace --launch",
-		"xcrun xctrace record --launch=/bin/sh":             "xctrace --launch",
-		"xcrun python3 -c 'print(1)'":                       "only queries the SDK or starts",
-		"xcrun swift run":                                   "only queries the SDK or starts",
-		"xcrun --sdk macosx clang -fplugin=/x.dylib":        "only queries the SDK",
-		"xcrun":                                             "only queries the SDK or starts",
+		"xcrun xctrace record --launch -- /bin/sh":                                      "xctrace --launch",
+		"xcrun xctrace record --launch=/bin/sh":                                         "xctrace --launch",
+		"xcrun python3 -c 'print(1)'":                                                   "only queries the SDK or starts",
+		"xcrun swift run":                                                               "only queries the SDK or starts",
+		"xcrun --sdk macosx clang -fplugin=/x.dylib":                                    "only queries the SDK",
+		"xcrun": "only queries the SDK or starts",
 	}
 	for command, reason := range cases {
 		for _, sandboxOff := range []bool{false, true} {
-			why := Decide(bashEvent(t, command, sandboxOff, config.Root), config.Root, config)
+			why := Decide(sessionBash(t, command, sandboxOff, config.Root, opus), config.Root, config)
 			if reason == "" && why != "" || reason != "" && !strings.Contains(why, reason) {
 				t.Errorf("%q (sandbox off %v): wanted %q, got %q", command, sandboxOff, reason, why)
 			}

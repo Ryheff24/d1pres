@@ -44,7 +44,9 @@ func CompanionForm(command string) string {
 
 // excludedNames are the programs the owner's sandbox.excludedCommands runs outside Claude Code's
 // sandbox with no flag set (owner, 2026-10-16: they stay, and codex exec keeps working; 2026-10-19:
-// copilot -p joins them, allowed the same way codex is).
+// copilot -p joins them, allowed the same way codex is; 2026-10-25, on the access control matrix:
+// elevated models only, and security only as find-identity, since its other subcommands read the
+// keychain).
 var excludedNames = []string{"xcrun", "xcodebuild", "codesign", "security", "system_profiler", "log", "codex", "copilot"}
 
 // excludedPaths are the only absolute spellings accepted for them: the system's own, and the
@@ -90,8 +92,8 @@ func ExcludedForm(command string) string {
 		subcommand = words[1]
 	}
 	if name == "codex" && subcommand != "exec" || name == "copilot" && subcommand != "-p" ||
-		name == "log" && subcommand != "show" && subcommand != "stream" {
-		return "only codex exec, copilot -p, log show and log stream are excluded from the sandbox, not " + name + " " + subcommand
+		name == "log" && subcommand != "show" && subcommand != "stream" || name == "security" && subcommand != "find-identity" {
+		return "only codex exec, copilot -p, log show, log stream and security find-identity are excluded from the sandbox, not " + name + " " + subcommand
 	}
 	if name == "copilot" {
 		for _, word := range words {
