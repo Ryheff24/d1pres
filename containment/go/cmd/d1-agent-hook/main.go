@@ -61,9 +61,10 @@ func block(why string) {
 }
 
 // configuration is the build's repository root, the account's home directory (from the account
-// database, not $HOME) and the fixed launcher directory, each checked.
+// database, not $HOME), the fixed launcher directory, each checked, and the session's
+// ANTHROPIC_BASE_URL, which only ever lowers a session to the current limits (hook.Elevated).
 func configuration() (hook.Config, error) {
-	config := hook.Config{Root: repositoryRoot, LauncherDirectory: hook.LauncherDirectory}
+	config := hook.Config{Root: repositoryRoot, LauncherDirectory: hook.LauncherDirectory, AnthropicBaseURL: os.Getenv("ANTHROPIC_BASE_URL")}
 	home, err := gate.Home()
 	if err != nil {
 		return config, fmt.Errorf("home directory: %w", err)

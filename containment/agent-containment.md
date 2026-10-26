@@ -116,6 +116,85 @@ on it. A test that needs a socket fails, visibly, and gets an in-memory transpor
   workspace tool (not a test) that opens a socket. Both are deliberate evasions of the rule above,
   which the hook and the instructions forbid; neither is a path a test takes by accident.
 
+## Access control matrix (owner, 2026-10-25)
+
+Who gets what. The table is generated from `containment/go/hook/matrix.go`, and
+`TestAccessMatrix` runs probes of every row through the hook for an elevated session and for a
+limited one, the base cases neither gets included. The suite fails if a row and the hook disagree,
+or if this table differs from the code. It holds for sessions working in, inside or above the
+repository; a session elsewhere meets only the game-code row. The owner, in their own terminal, is
+outside the hook. A refusal names this section.
+
+<!-- access control matrix: generated from containment/go/hook/matrix.go (MatrixTable); TestAccessMatrix fails when this differs -->
+Elevated models: `gpt-6.1-sol`, `gpt-6-astra`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-1`. Every other model, Claude Code subagents included (each by its own model), is the second column.
+
+| capability | elevated models | every other model | enforced by |
+|---|---|---|---|
+| Bash inside the sandbox | yes: the sandbox's own limits | yes: the sandbox's own limits | Claude Code's sandbox; the hook passes it |
+| Bash that names a protected file | yes: pure reads only | yes: pure reads only | Tripwire (protect.go) |
+| Edit, Write or apply_patch of a protected file (gate.ProtectedFiles, ~/.claude/settings.json) | no | no | ProtectedTarget (protect.go) |
+| Edit, Write or apply_patch of the session records (~/.claude/projects except each memory/, ~/.codex/sessions) | no | no | RecordsTarget (elevated.go) |
+| Game code: d1-recomp, d1-oracle, d1-replay, d1-srv | yes: only as d1-nonet's program, sandbox off | yes: only as d1-nonet's program, sandbox off | decideBash, LauncherForm (hook.go) |
+| Running tests (cargo and Go test binaries) | yes: only under d1-nonet | yes: only under d1-nonet | LauncherForm (hook.go); the test gate in each binary |
+| Servers and other programs that listen | yes: only under d1-localonly, sandbox off, never a game binary or a test | yes: only under d1-localonly, sandbox off, never a game binary or a test | LauncherForm (hook.go) |
+| Codex through the plugin's companion script | yes: setup, task, status, result, cancel, alone; no reviews | yes: setup, task, status, result, cancel, alone; no reviews | CompanionForm (shell.go) |
+| The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, log show and stream, codex exec, copilot -p | yes: alone; copilot only with an --allow-tool list | no | decideBash (hook.go), ExcludedForm (shell.go) |
+| security (also sandbox-excluded) | yes: find-identity only | no | ExcludedForm (shell.go) |
+| xcrun (also sandbox-excluded) | yes: SDK queries; simctl, devicectl, xctrace without --launch | no | xcrunForm (shell.go) |
+| Inspecting processes, memory and network: ps, pgrep, lsof, nettop, top, vm_stat, sample, leaks, vmmap, heap | yes: sandbox off, alone or piped into grep, head, tail, wc; no writing options; nettop and top only with -l | no | ElevatedForm, elevatedGrants (elevated.go) |
+| Stopping processes: kill, pkill, killall | yes: sandbox off, this project's processes only | no | killForm, projectProcess (elevated.go) |
+| Opening files in VS Code: code | yes: sandbox off, -r or -g, up to 20 existing files in this repository; no folders, workspaces, .vscode, .git | no | codeForm (elevated.go) |
+| Anything else with the sandbox off | no | no | LauncherForm (hook.go), ElevatedForm (elevated.go) |
+| Network from game code and from servers | game code none; servers this Mac only | game code none; servers this Mac only | game.sb, local.sb and the C gate; the containment suite tests them |
+<!-- end of access control matrix -->
+
+## Elevated tools by model (owner, 2026-10-25)
+
+The owner's ruling: "gpt sol 6.1, gpt 6 astra, claude 5.5, fable 5.1 - elevated; everything else -
+current limit". Elevated means basic process management and system tools, outside the sandbox,
+and nothing more: the agents that clean up after themselves need them, and the rest keep today's
+limits. The hook decides it per call (`containment/go/hook/elevated.go`). Decided on the PR the
+same day: every Claude 5.5 model is elevated (Sonnet and Haiku as well as Opus), and the programs
+the owner's settings run outside the sandbox are for elevated models only.
+
+- **Which model makes the call.** Codex puts the model in the hook event. Claude Code does not:
+  the hook reads `message.model` of the last assistant entry in the session's transcript, parsed
+  as JSON (a subagent's call is read from its own file beside the transcript, by `agent_id`).
+  Elevated are exactly the ids in the matrix's first line; a provider-prefixed id
+  (`anthropic/claude-opus-5-5` through OpenRouter) is not, and neither is an older version
+  (`claude-haiku-4-5`). A Claude Code session whose `ANTHROPIC_BASE_URL` is set to anything but
+  Anthropic's API stays at the current limits whatever model it names. Anything the hook cannot
+  read is the current limit.
+- **The records cannot be rewritten.** The edit tools and `apply_patch` are refused under
+  `~/.claude/projects` (except each project's `memory/`) and `~/.codex/sessions`, for every model;
+  Claude Code's sandbox already denies Bash writes there.
+- **What elevated adds,** only with the sandbox off, as one command with no shell syntax beyond
+  quotes and `|` into `grep`, `head`, `tail` or `wc`, each program at its system path:
+  - `ps`, `pgrep`, `lsof`, `nettop`, `top`, `vm_stat`, `sample`, `leaks`, `vmmap`, `heap`, without
+    their writing options (`sample -file`, `-e`; `leaks --outputGraph`, `--atExit`, `--`), and
+    `nettop` and `top` only in logging mode (`-l N`), so they end;
+  - `kill`, `pkill` and `killall` only at this project's processes: working in the repository,
+    and built in it, named `d1-*`, or one of `z3`, `java`, `tlapm`, `poly`, `make`. Never an agent
+    session (claude, node, codex) or another project's process; `pkill` and `killall` are resolved
+    with `pgrep` first and refused if any match is not the project's;
+  - `code` (`-r`, `-g`) only on existing files in the repository: never a folder, a
+    `.code-workspace` file, or anything under `.vscode/` or `.git/`, since opening a folder or
+    workspace can start its tasks.
+- **Everything else is unchanged, for every model:** the launchers, the tripwire, the protected
+  files, game binaries only under `d1-nonet`, tests only under `d1-nonet`.
+- **The owner's sandbox-excluded programs are elevated only** (`xcrun`, `xcodebuild`, `codesign`,
+  `security`, `system_profiler`, `log show` and `log stream`, `codex exec`, `copilot -p`). The
+  owner's `sandbox.excludedCommands` runs them outside the sandbox with no flag set, so before this
+  any model, DeepSeek included, ran them there. `security` is admitted only as `find-identity`:
+  its other subcommands read the keychain (`find-generic-password -w` prints a password). `xcrun`
+  only queries the SDK (`--show-sdk-*`, `-f`, `--find`, `--sdk NAME` with one of them) or starts
+  `simctl`, `devicectl` or `xctrace`, and `xctrace` never with `--launch`; before, `xcrun python3`,
+  `xcrun swift` and `xctrace record --launch` ran any code outside containment.
+- **Known limits.** `xcodebuild` runs a project's build-phase scripts outside the sandbox, for
+  elevated models. `codex exec` and `copilot -p` from Bash remain open to elevated models by the
+  owner's choice (2026-10-25), though CLAUDE.md says agents go through the Codex plugin. A bare tool
+  name is checked against the hook's PATH, which can differ from the shell's.
+
 ## Procedure part: agent docs (CLAUDE.md, plus AGENTS.md for Codex)
 
 A short section, "Running the game or anything network-touching":

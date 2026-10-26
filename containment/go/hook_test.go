@@ -37,14 +37,16 @@ func fakeHookTree(t *testing.T) hook.Config {
 	return config
 }
 
-// bashEvent is a Bash PreToolUse event as Claude Code sends it.
+// bashEvent is a Bash PreToolUse event from an elevated model's session (Codex's model field), so
+// these tests reach the forms of the excluded programs; what every other model gets is
+// TestAccessMatrix's (hook/matrix_test.go).
 func bashEvent(t *testing.T, command string, sandboxOff bool, cwd string) []byte {
 	t.Helper()
 	input := map[string]any{"command": command, "description": "test"}
 	if sandboxOff {
 		input["dangerouslyDisableSandbox"] = true
 	}
-	return marshal(t, map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": input, "cwd": cwd})
+	return marshal(t, map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": input, "cwd": cwd, "model": "gpt-6.1-sol"})
 }
 
 // editEvent is an edit-tool PreToolUse event for one path.
@@ -185,7 +187,8 @@ func TestHookBash(t *testing.T) {
 		{"D1_X=1 d1-replay capture", true, outside, "runs game code"},
 		{"xcrun --show-sdk-path", true, inside, ""},
 		{"xcrun --show-sdk-path", false, inside, ""},
-		{"/usr/bin/security find-certificate -a", true, inside, ""},
+		{"/usr/bin/security find-identity -p codesigning", true, inside, ""},
+		{"/usr/bin/security find-certificate -a", true, inside, "security find-identity"},
 		{"log show --last 1m", false, inside, ""},
 		{codexHeredoc, true, inside, ""},
 		{codexContinued, true, inside, ""},
@@ -204,7 +207,7 @@ func TestHookBash(t *testing.T) {
 		{"xcrun true\ncurl x", false, inside, "a second line"},
 		{"/tmp/codex exec x", true, inside, "must start with it"},
 		{"codex login", true, inside, "only codex exec"},
-		{"log erase --all", false, inside, "only codex exec, copilot -p, log show and log stream"},
+		{"log erase --all", false, inside, "only codex exec, copilot -p, log show, log stream"},
 		{"copilot -p \"read the docs\" --model auto --no-ask-user --allow-tool 'shell(d1-server/target/release/d1-eboot)'", true, inside, ""},
 		{"/Users/ryanheffernan/.nvm/versions/node/v22.19.0/bin/copilot -p x --allow-tool 'shell(ls)'", true, inside, ""},
 		{"copilot -p x --allow-all", true, inside, "never --allow-all"},
@@ -330,7 +333,7 @@ func TestHookEdits(t *testing.T) {
 			t.Errorf("%s of %s relative to the repository was not refused: %q", tool, relative, why)
 		}
 	}
-	for _, path := range []string{config.Root + "/notes.md", config.Root + "/Containment/Notes.md", config.Root + "/containment/go/new.go", base + "/repo-link/new.md", config.Home + "/.claude/projects/memory.md"} {
+	for _, path := range []string{config.Root + "/notes.md", config.Root + "/Containment/Notes.md", config.Root + "/containment/go/new.go", base + "/repo-link/new.md", config.Home + "/.claude/projects/repo/memory/fact.md"} {
 		why := hook.Decide(editEvent(t, "Edit", path, "/"), "", config)
 		if why != "" {
 			t.Errorf("an edit of %s was refused: %q", path, why)

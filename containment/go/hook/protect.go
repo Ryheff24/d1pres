@@ -20,7 +20,9 @@ func ProtectedPaths(config Config) []string {
 	return append(paths, filepath.Join(config.Home, ".claude", "settings.json"))
 }
 
-// decideEdit refuses an edit of a protected file, from any session.
+// decideEdit refuses an edit of a protected file or of the harness's session records, from any
+// session. The records are refused because the elevated check reads the model from them
+// (SessionModel): a session that could edit its own transcript could name itself an elevated model.
 func decideEdit(tool string, input toolInput, cwd string, config Config) string {
 	path := input.FilePath
 	if path == "" {
@@ -31,6 +33,9 @@ func decideEdit(tool string, input toolInput, cwd string, config Config) string 
 	}
 	why := ProtectedTarget(path, cwd, config)
 	if why == "" {
+		why = RecordsTarget(path, cwd, config)
+	}
+	if why == "" {
 		return ""
 	}
 	return tool + " of " + path + " refused: " + why
@@ -40,10 +45,10 @@ func decideEdit(tool string, input toolInput, cwd string, config Config) string 
 // deletes or renames to.
 var patchFileMarkers = []string{"*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"}
 
-// decidePatch refuses a Codex apply_patch that writes a protected file, from any session. The
-// patch text is in tool_input.command. Every file line is checked; a patch that names no file
-// is refused, since what it writes cannot be told. A marker inside a hunk's content starts with
-// "+", "-" or a space, so it is not read as a file line.
+// decidePatch refuses a Codex apply_patch that writes a protected file or a session record, from
+// any session. The patch text is in tool_input.command. Every file line is checked; a patch that
+// names no file is refused, since what it writes cannot be told. A marker inside a hunk's content
+// starts with "+", "-" or a space, so it is not read as a file line.
 func decidePatch(input toolInput, cwd string, config Config) string {
 	if input.Command == nil {
 		return "apply_patch: no patch text in the event"
@@ -64,6 +69,9 @@ func decidePatch(input toolInput, cwd string, config Config) string {
 			return "apply_patch: a file line names no path"
 		}
 		why := ProtectedTarget(path, cwd, config)
+		if why == "" {
+			why = RecordsTarget(path, cwd, config)
+		}
 		if why != "" {
 			return "apply_patch of " + path + " refused: " + why
 		}

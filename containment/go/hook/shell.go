@@ -44,7 +44,9 @@ func CompanionForm(command string) string {
 
 // excludedNames are the programs the owner's sandbox.excludedCommands runs outside Claude Code's
 // sandbox with no flag set (owner, 2026-10-16: they stay, and codex exec keeps working; 2026-10-19:
-// copilot -p joins them, allowed the same way codex is).
+// copilot -p joins them, allowed the same way codex is; 2026-10-25, on the access control matrix:
+// elevated models only, and security only as find-identity, since its other subcommands read the
+// keychain).
 var excludedNames = []string{"xcrun", "xcodebuild", "codesign", "security", "system_profiler", "log", "codex", "copilot"}
 
 // excludedPaths are the only absolute spellings accepted for them: the system's own, and the
@@ -69,7 +71,7 @@ func isExcludedName(word string) bool {
 
 // ExcludedForm returns "" when command is one excluded program run alone: its name or accepted
 // path first (codex only as "codex exec", copilot only as "copilot -p" with none of
-// copilotBlanket, log only as "log show" or "log stream"), then arguments that may use quotes,
+// copilotBlanket, log only as "log show" or "log stream", xcrun only as xcrunForm admits), then arguments that may use quotes,
 // $NAME, redirections and lines joined with a trailing backslash, and at most one heredoc with a
 // quoted delimiter, whose body is data. Anything that could start a second command is refused, so
 // nothing rides along outside the sandbox. Redirections stay allowed: the owner's codex pattern
@@ -90,8 +92,8 @@ func ExcludedForm(command string) string {
 		subcommand = words[1]
 	}
 	if name == "codex" && subcommand != "exec" || name == "copilot" && subcommand != "-p" ||
-		name == "log" && subcommand != "show" && subcommand != "stream" {
-		return "only codex exec, copilot -p, log show and log stream are excluded from the sandbox, not " + name + " " + subcommand
+		name == "log" && subcommand != "show" && subcommand != "stream" || name == "security" && subcommand != "find-identity" {
+		return "only codex exec, copilot -p, log show, log stream and security find-identity are excluded from the sandbox, not " + name + " " + subcommand
 	}
 	if name == "copilot" {
 		for _, word := range words {
@@ -100,7 +102,38 @@ func ExcludedForm(command string) string {
 			}
 		}
 	}
-	return heredocEnds(rest, delimiter)
+	if why := heredocEnds(rest, delimiter); why != "" {
+		return why
+	}
+	if name == "xcrun" {
+		return xcrunForm(words[1:])
+	}
+	return ""
+}
+
+// xcrunQueries are the xcrun options that only print where the SDK or a tool is; xcrunTools are the
+// tools it may start: the simulator and device controls and Instruments (xctrace).
+var xcrunQueries = []string{"--show-sdk-path", "--show-sdk-version", "--show-sdk-build-version", "--show-sdk-platform-path", "--show-sdk-platform-version", "--version", "-f", "--find"}
+var xcrunTools = []string{"simctl", "devicectl", "xctrace"}
+
+// xcrunForm returns "" when xcrun's arguments only query the SDK ([--sdk NAME] and one of
+// xcrunQueries) or start one of xcrunTools, and xctrace never with --launch. xcrun outside the
+// sandbox otherwise starts any developer tool by name (python3, swift, clang with a plugin), and
+// xctrace --launch starts any program: both run code outside containment (2026-10-25).
+func xcrunForm(arguments []string) string {
+	if len(arguments) >= 2 && arguments[0] == "--sdk" {
+		if len(arguments) < 3 || !slices.Contains(xcrunQueries, arguments[2]) {
+			return "xcrun --sdk NAME only queries the SDK (" + strings.Join(xcrunQueries, ", ") + "); it does not start tools outside the sandbox"
+		}
+		return ""
+	}
+	if len(arguments) == 0 || !slices.Contains(xcrunQueries, arguments[0]) && !slices.Contains(xcrunTools, arguments[0]) {
+		return "xcrun outside the sandbox only queries the SDK or starts " + strings.Join(xcrunTools, ", ") + "; any other developer tool runs inside the sandbox"
+	}
+	if arguments[0] == "xctrace" && slices.ContainsFunc(arguments, func(word string) bool { return strings.HasPrefix(word, "--launch") }) {
+		return "xctrace --launch starts a program outside containment; record with --attach PID on a process started by its launcher"
+	}
+	return ""
 }
 
 // logicalLine joins the first line with the lines a trailing backslash continues, and returns

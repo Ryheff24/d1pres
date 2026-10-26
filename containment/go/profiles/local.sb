@@ -48,7 +48,7 @@
 (deny file-write* (repo-path "/containment/go/gate") (repo-path "/containment/go/gate/gate.go")) ; the probes
 (deny file-write* (repo-path "/containment/go/gate/launch.go") (repo-path "/containment/go/gate/local.go")) ; the launch steps, local probes and this list
 (deny file-write* (repo-path "/containment/go/hook") (repo-path "/containment/go/hook/hook.go")) ; the hook's rules
-(deny file-write* (repo-path "/containment/go/hook/install.go") (repo-path "/containment/go/hook/protect.go") (repo-path "/containment/go/hook/shell.go")) ; and the rest of them
+(deny file-write* (repo-path "/containment/go/hook/install.go") (repo-path "/containment/go/hook/protect.go") (repo-path "/containment/go/hook/shell.go") (repo-path "/containment/go/hook/elevated.go")) ; and the rest of them
 (deny file-write* (repo-path "/containment/go/cmd") (repo-path "/containment/go/cmd/d1-nonet") (repo-path "/containment/go/cmd/d1-nonet/main.go")) ; d1-nonet
 (deny file-write* (repo-path "/containment/go/cmd/d1-localonly") (repo-path "/containment/go/cmd/d1-localonly/main.go")) ; d1-localonly
 (deny file-write* (repo-path "/containment/go/cmd/d1-agent-hook") (repo-path "/containment/go/cmd/d1-agent-hook/main.go")) ; the hook
