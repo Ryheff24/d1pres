@@ -126,7 +126,7 @@ repository; a session elsewhere meets only the game-code row. The owner, in thei
 outside the hook. A refusal names this section.
 
 <!-- access control matrix: generated from containment/go/hook/matrix.go (MatrixTable); TestAccessMatrix fails when this differs -->
-Elevated models: `gpt-6.1-sol`, `gpt-6-astra`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-1`. Every other model, Claude Code subagents included (each by its own model), is the second column.
+Elevated models: `gpt-6.1-sol`, `gpt-6-astra`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-1`, `claude-mythos-5-1`. Every other model, Claude Code subagents included (each by its own model), is the second column.
 
 | capability | elevated models | every other model | enforced by |
 |---|---|---|---|
@@ -156,7 +156,8 @@ current limit". Elevated means basic process management and system tools, outsid
 and nothing more: the agents that clean up after themselves need them, and the rest keep today's
 limits. The hook decides it per call (`containment/go/hook/elevated.go`). Decided on the PR the
 same day: every Claude 5.5 model is elevated (Sonnet and Haiku as well as Opus), and the programs
-the owner's settings run outside the sandbox are for elevated models only.
+the owner's settings run outside the sandbox are for elevated models only. Added 2026-10-27
+(owner): "mythos is elevated as well", as `claude-mythos-5-1`, the id its sessions record.
 
 - **Which model makes the call.** Codex puts the model in the hook event. Claude Code does not:
   the hook reads `message.model` of the last assistant entry in the session's transcript, parsed
