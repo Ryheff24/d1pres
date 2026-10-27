@@ -15,10 +15,11 @@ import (
 
 // ElevatedModels are the models whose sessions may run the elevated tools with the sandbox off
 // (owner, 2026-10-25: "gpt sol 6.1, gpt 6 astra, claude 5.5, fable 5.1 - elevated; everything else -
-// current limit"; the same day, on the PR: every Claude 5.5 model, not only Opus). Exact model ids
-// as the harness records them; a provider-prefixed id (anthropic/claude-opus-5-5 through
-// OpenRouter) is not one of them. The access control matrix (matrix.go) is the summary.
-var ElevatedModels = []string{"gpt-6.1-sol", "gpt-6-astra", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"}
+// current limit"; the same day, on the PR: every Claude 5.5 model, not only Opus; 2026-10-27:
+// "mythos is elevated as well", claude-mythos-5-1). Exact model ids as the harness records them; a
+// provider-prefixed id (anthropic/claude-opus-5-5 through OpenRouter) is not one of them. The access
+// control matrix (matrix.go) is the summary.
+var ElevatedModels = []string{"gpt-6.1-sol", "gpt-6-astra", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-mythos-5-1"}
 
 // anthropicAPI is the only base URL an elevated Claude Code session talks to. A session started
 // with ANTHROPIC_BASE_URL set to anything else (ori, OpenRouter, a local proxy) stays at the current

@@ -124,6 +124,7 @@ func TestHookElevatedModel(t *testing.T) {
 	writeTranscript(t, config, "opus/subagents/agent-ahaiku-1.jsonl", assistant("claude-haiku-5-5"))
 	writeTranscript(t, config, "opus/subagents/agent-aold-1.jsonl", assistant("claude-haiku-4-5"))
 	sonnet := writeTranscript(t, config, "sonnet.jsonl", assistant("claude-sonnet-5-5"))
+	mythos := writeTranscript(t, config, "mythos.jsonl", assistant("claude-mythos-5-1"))
 	routed := writeTranscript(t, config, "routed.jsonl", assistant("anthropic/claude-opus-5-5"))
 	outsideRecords := filepath.Join(config.Root, "fake.jsonl")
 	if err := os.WriteFile(outsideRecords, []byte(assistant("claude-opus-5-5")+"\n"), 0o644); err != nil {
@@ -144,6 +145,8 @@ func TestHookElevatedModel(t *testing.T) {
 		{"haiku 5.5 subagent of the opus session", opus, "ahaiku-1", "", "", true},
 		{"haiku 4.5 subagent of the opus session", opus, "aold-1", "", "", false},
 		{"sonnet 5.5 session", sonnet, "", "", "", true},
+		{"mythos 5.1 session", mythos, "", "", "", true},
+		{"mythos 5.1 session through another provider", mythos, "", "", "https://openrouter.ai/api", false},
 		{"subagent id with a path in it", opus, "../x", "", "", false},
 		{"missing subagent record", opus, "nobody", "", "", false},
 		{"deepseek session quoting an opus record", deepseek, "", "", "", false},
