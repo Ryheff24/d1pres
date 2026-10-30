@@ -138,10 +138,11 @@ Elevated models: `gpt-6.1-sol`, `gpt-6-astra`, `claude-opus-5-5`, `claude-sonnet
 | Running tests (cargo and Go test binaries) | yes: only under d1-nonet | yes: only under d1-nonet | LauncherForm (hook.go); the test gate in each binary |
 | Servers and other programs that listen | yes: only under d1-localonly, sandbox off, never a game binary or a test | yes: only under d1-localonly, sandbox off, never a game binary or a test | LauncherForm (hook.go) |
 | Codex through the plugin's companion script | yes: setup, task, status, result, cancel, alone; no reviews | yes: setup, task, status, result, cancel, alone; no reviews | CompanionForm (shell.go) |
-| The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, log show and stream, codex exec, copilot -p | yes: alone; copilot only with an --allow-tool list | no | decideBash (hook.go), ExcludedForm (shell.go) |
+| The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, codex exec, copilot -p | yes: alone; copilot only with an --allow-tool list | no | decideBash (hook.go), ExcludedForm (shell.go) |
+| Read-only logs and profilers: log show and stream, xctrace export and list, sample, vmmap, footprint, malloc_history, metalperftrace overview and listen | yes: at its own path, alone, one line of plain words or '...' text, listed options only, this project's processes by PID and files in the repository only, no output files | yes: at its own path, alone, one line of plain words or '...' text, listed options only, this project's processes by PID and files in the repository only, no output files | ProfilerForm, profilerSpecs (profiler.go) |
 | security (also sandbox-excluded) | yes: find-identity only | no | ExcludedForm (shell.go) |
-| xcrun (also sandbox-excluded) | yes: SDK queries; simctl, devicectl, xctrace without --launch | no | xcrunForm (shell.go) |
-| Inspecting processes, memory and network: ps, pgrep, lsof, nettop, top, vm_stat, sample, leaks, vmmap, heap | yes: sandbox off, alone or piped into grep, head, tail, wc; no writing options; nettop and top only with -l | no | ElevatedForm, elevatedGrants (elevated.go) |
+| xcrun (also sandbox-excluded) | yes: SDK queries; simctl, devicectl | no | xcrunForm (shell.go) |
+| Inspecting processes, memory and network: ps, pgrep, lsof, nettop, top, vm_stat, leaks, heap | yes: sandbox off, alone or piped into grep, head, tail, wc; no writing options; nettop and top only with -l | no | ElevatedForm, elevatedGrants (elevated.go) |
 | Reading system state: sysctl, pmset, memory_pressure | yes: sandbox off, alone or piped into grep, head, tail, wc; sysctl without -w or name=value; pmset -g only; memory_pressure alone or -Q | no | systemForm (elevated.go) |
 | Stopping processes: kill, pkill, killall | yes: sandbox off, this project's processes only | no | killForm, projectProcess (elevated.go) |
 | Opening files in VS Code: code | yes: sandbox off, -r or -g, up to 20 existing files in this repository; no folders, workspaces, .vscode, .git | no | codeForm (elevated.go) |
@@ -156,7 +157,8 @@ current limit". Elevated means basic process management and system tools, outsid
 and nothing more: the agents that clean up after themselves need them, and the rest keep today's
 limits. The hook decides it per call (`containment/go/hook/elevated.go`). Decided on the PR the
 same day: every Claude 5.5 model is elevated (Sonnet and Haiku as well as Opus), and the programs
-the owner's settings run outside the sandbox are for elevated models only. Added 2026-10-27
+the owner's settings run outside the sandbox are for elevated models only (except, since
+2026-10-28, the read-only logs and profilers below, for every model). Added 2026-10-27
 (owner): "mythos is elevated as well", as `claude-mythos-5-1`, the id its sessions record.
 
 - **Which model makes the call.** Codex puts the model in the hook event. Claude Code does not:
@@ -172,8 +174,8 @@ the owner's settings run outside the sandbox are for elevated models only. Added
   Claude Code's sandbox already denies Bash writes there.
 - **What elevated adds,** only with the sandbox off, as one command with no shell syntax beyond
   quotes and `|` into `grep`, `head`, `tail` or `wc`, each program at its system path:
-  - `ps`, `pgrep`, `lsof`, `nettop`, `top`, `vm_stat`, `sample`, `leaks`, `vmmap`, `heap`, without
-    their writing options (`sample -file`, `-e`; `leaks --outputGraph`, `--atExit`, `--`), and
+  - `ps`, `pgrep`, `lsof`, `nettop`, `top`, `vm_stat`, `leaks`, `heap`, without their writing
+    options (`leaks --outputGraph`, `--atExit`, `--`), and
     `nettop` and `top` only in logging mode (`-l N`), so they end;
   - `kill`, `pkill` and `killall` only at this project's processes: working in the repository,
     and built in it, named `d1-*`, or one of `z3`, `java`, `tlapm`, `poly`, `make`. Never an agent
@@ -184,13 +186,40 @@ the owner's settings run outside the sandbox are for elevated models only. Added
     workspace can start its tasks.
 - **Everything else is unchanged, for every model:** the launchers, the tripwire, the protected
   files, game binaries only under `d1-nonet`, tests only under `d1-nonet`.
-- **The owner's sandbox-excluded programs are elevated only** (`xcrun`, `xcodebuild`, `codesign`,
-  `security`, `system_profiler`, `log show` and `log stream`, `codex exec`, `copilot -p`). The
+- **The read-only logs and profilers are open to every model** (owner, 2026-10-28: agents need
+  measurement tools; anything read-only that cannot damage the machine is admitted), with the
+  sandbox on or off, as `ProfilerForm` (`containment/go/hook/profiler.go`) admits:
+  - `/usr/bin/log show` and `stream`; `xctrace export` and `list templates|instruments`, at
+    `/Applications/Xcode.app/Contents/Developer/usr/bin/xctrace` (not through `xcrun`, which picks
+    the tool by `DEVELOPER_DIR`); `/usr/bin/sample`, `vmmap`, `footprint`, `malloc_history`; and
+    `/usr/bin/metalperftrace overview` and `listen`;
+  - at that path only (a bare name could find a planted program on `PATH`), alone, on one line;
+  - the line is plain words (letters, digits, `- _ . , : / = + @ %`) or `'...'` text, read as bash
+    reads it before any check, so no comment, expansion, redirection, escape or second command;
+  - only the options listed per tool in `profilerSpecs`, each once;
+  - a process only by PID, and only one of this project's (`projectProcess`, as for `kill`); a file
+    read (`xctrace export --input`, `metalperftrace overview`) only inside the repository;
+  - nothing written to a file. A check of an output path before the tool runs can be raced by an
+    agent through a link in `runs/`, so `xctrace record`, `metalperftrace collect` and every
+    `--output` stay the owner's. `sample` still writes its own report under `/tmp`.
+  - Left out on purpose: `--predicate`, which can call methods in the tool; `log --pager`, which
+    starts `less`; `log show --archive` (any file); `sample -e`, which opens TextEdit, and `-wait`;
+    `malloc_history -showContent`, which prints heap contents; every tool's `-forkCorpse`;
+    `footprint --all`, `--targetChildren`, `--unmapped` and process names; `metalperftrace setup`.
+  - Two proposals were blocked by review (2026-10-28); every form those reviews found is a refusal
+    in `TestAccessMatrix`.
+  - Never record with `xctrace` under `d1-localonly`: its profile denies `lsd`, and the trace comes
+    out malformed (04.4.9).
+- **The excluded-program parser reads comments and continuations as bash does** (2026-10-28): an
+  unquoted word starting with `#` is refused (a comment could hide a fake heredoc whose "body" bash
+  runs), and a backslash-newline joins with nothing between, as bash joins it.
+- **The owner's other sandbox-excluded programs are elevated only** (`xcrun`, `xcodebuild`,
+  `codesign`, `security`, `system_profiler`, `codex exec`, `copilot -p`). The
   owner's `sandbox.excludedCommands` runs them outside the sandbox with no flag set, so before this
   any model, DeepSeek included, ran them there. `security` is admitted only as `find-identity`:
   its other subcommands read the keychain (`find-generic-password -w` prints a password). `xcrun`
   only queries the SDK (`--show-sdk-*`, `-f`, `--find`, `--sdk NAME` with one of them) or starts
-  `simctl`, `devicectl` or `xctrace`, and `xctrace` never with `--launch`; before, `xcrun python3`,
+  `simctl` or `devicectl` (`xctrace` runs at its own path, above); before, `xcrun python3`,
   `xcrun swift` and `xctrace record --launch` ran any code outside containment.
 - **Known limits.** `xcodebuild` runs a project's build-phase scripts outside the sandbox, for
   elevated models. `codex exec` and `copilot -p` from Bash remain open to elevated models by the

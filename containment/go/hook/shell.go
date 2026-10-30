@@ -114,10 +114,11 @@ func ExcludedForm(command string) string {
 // xcrunQueries are the xcrun options that only print where the SDK or a tool is; xcrunTools are the
 // tools it may start: the simulator and device controls and Instruments (xctrace).
 var xcrunQueries = []string{"--show-sdk-path", "--show-sdk-version", "--show-sdk-build-version", "--show-sdk-platform-path", "--show-sdk-platform-version", "--version", "-f", "--find"}
-var xcrunTools = []string{"simctl", "devicectl", "xctrace"}
+var xcrunTools = []string{"simctl", "devicectl"}
 
 // xcrunForm returns "" when xcrun's arguments only query the SDK ([--sdk NAME] and one of
-// xcrunQueries) or start one of xcrunTools, and xctrace never with --launch. xcrun outside the
+// xcrunQueries) or start one of xcrunTools. xctrace is ProfilerForm's, at its own path (profiler.go,
+// 2026-10-28); the --launch check below stays as a second line. xcrun outside the
 // sandbox otherwise starts any developer tool by name (python3, swift, clang with a plugin), and
 // xctrace --launch starts any program: both run code outside containment (2026-10-25).
 func xcrunForm(arguments []string) string {
@@ -137,7 +138,9 @@ func xcrunForm(arguments []string) string {
 }
 
 // logicalLine joins the first line with the lines a trailing backslash continues, and returns
-// the joined line and everything after it.
+// the joined line and everything after it. Like bash, it removes the backslash and newline
+// outright: joining with a space made "--allow-a\<newline>ll" two harmless words here and one
+// --allow-all for bash (review, 2026-10-28).
 func logicalLine(command string) (string, string) {
 	lines := strings.Split(command, "\n")
 	joined := ""
@@ -145,7 +148,7 @@ func logicalLine(command string) (string, string) {
 		if !strings.HasSuffix(line, "\\") {
 			return joined + line, strings.Join(lines[index+1:], "\n")
 		}
-		joined += strings.TrimSuffix(line, "\\") + " "
+		joined += strings.TrimSuffix(line, "\\")
 	}
 	return joined, ""
 }
@@ -168,6 +171,10 @@ func scanShell(line string) (string, string) {
 			if character == '"' {
 				quote = 0
 			}
+		case character == '#' && (index == 0 || previous == ' ' || previous == '\t'):
+			// The rest of the line is a comment for bash, so a "<<'EOF'" after it is no heredoc and
+			// the "body" runs as commands (review, 2026-10-28).
+			return "", "\"#\" starts a comment, and what follows would not be what this check read"
 		case character == '\'' || character == '"':
 			quote = character
 		case character == ';' || character == '|' || (character == '<' || character == '>') && next == '(':

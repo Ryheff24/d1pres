@@ -139,7 +139,8 @@ type grant struct {
 }
 
 // elevatedGrants are the elevated tools, one table; the access control matrix (matrix.go) shows
-// them by row. sample -e opens TextEdit; leaks --atExit and anything after "--" run a program.
+// them by row. leaks --atExit and anything after "--" run a program. sample and vmmap are
+// ProfilerForm's since 2026-10-28 (profiler.go), for every model.
 var elevatedGrants = map[string]grant{
 	// processes, memory and network: they only read
 	"ps":      {"/bin/ps", true, nil},
@@ -148,9 +149,7 @@ var elevatedGrants = map[string]grant{
 	"nettop":  {"/usr/bin/nettop", true, nil},
 	"top":     {"/usr/bin/top", true, nil},
 	"vm_stat": {"/usr/bin/vm_stat", true, nil},
-	"sample":  {"/usr/bin/sample", true, []string{"-file", "-e"}},
 	"leaks":   {"/usr/bin/leaks", true, []string{"--outputGraph", "--atExit", "--"}},
-	"vmmap":   {"/usr/bin/vmmap", true, nil},
 	"heap":    {"/usr/bin/heap", true, nil},
 	// system state (cores, memory, swap, thermal and power): read only (systemForm)
 	"sysctl":          {"/usr/sbin/sysctl", true, nil},
