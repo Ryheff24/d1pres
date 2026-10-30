@@ -8,7 +8,7 @@
 # binaries (cmd/*) is not counted.
 #
 # A failing test fails the suite step itself, so the red step is the one whose log names the
-# test; octocov still reports what ran.
+# test; on a PR the failing tests are also posted as a comment. octocov still reports what ran.
 #
 # TestCGate* and TestBuiltGateStacks are skipped. They need d1preservation's root (design/,
 # d1-server/, the built Rust binaries), so install.sh runs them during d1 containment install.
@@ -50,7 +50,20 @@ jobs:
 
       - name: containment suite with coverage
         working-directory: containment/go
-        run: go test -count=1 -skip "$SKIP" -coverpkg=./... -coverprofile="$GITHUB_WORKSPACE/coverage.out" ./...
+        shell: bash # -eo pipefail: the step fails when go test does, through the pipe
+        run: go test -count=1 -skip "$SKIP" -coverpkg=./... -coverprofile="$GITHUB_WORKSPACE/coverage.out" ./... 2>&1 | tee "$RUNNER_TEMP/suite.txt"
+
+      # The failing tests as a PR comment, readable without the job log.
+      - name: post the failing tests on the PR
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          grep -E -A12 '^--- FAIL|^panic:|\[(build|setup) failed\]' "$RUNNER_TEMP/suite.txt" | head -150 > "$RUNNER_TEMP/fails.txt" || exit 0
+          [ -s "$RUNNER_TEMP/fails.txt" ] || exit 0
+          { echo "**containment suite failed** (run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT)"; echo '```'; cat "$RUNNER_TEMP/fails.txt"; echo '```'; } > "$RUNNER_TEMP/fails.md"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/fails.md"
 
       - uses: k1LoW/octocov-action@a167dc0dee441b7ffc45e1b862ab55ec0d87f278 # v1.5.2
         if: always() && hashFiles('coverage.out') != ''
