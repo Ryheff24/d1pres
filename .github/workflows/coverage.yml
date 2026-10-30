@@ -48,10 +48,38 @@ jobs:
           go-version: 1.27.x
           cache: false
 
+      # Two ways the runner differs from a workstation, each failing a test for a reason that is
+      # not the containment's (09.18, run 41114995797).
+      - name: make the runner look like a workstation
+        run: |
+          # TestResolver: the runner lists its own LocalHostName.local in /etc/hosts, so the name
+          # resolves from that file without the mDNS service game.sb denies. Drop it, so only
+          # the service can answer, as on a Mac.
+          name="$(scutil --get LocalHostName).local"
+          grep -n -i -w -F "$name" /etc/hosts || echo "$name is not in /etc/hosts"
+          grep -v -i -w -F "$name" /etc/hosts > "$RUNNER_TEMP/hosts" || true
+          sudo cp "$RUNNER_TEMP/hosts" /etc/hosts
+          sudo dscacheutil -flushcache
+          # TestHookElevatedForm: the hook admits code only as /usr/local/bin/code, and the runner
+          # has no VS Code. The tests never run this placeholder; anything that does gets exit 1.
+          if [ ! -e /usr/local/bin/code ]; then
+            printf '#!/bin/sh\necho "CI placeholder for /usr/local/bin/code, not VS Code" >&2\nexit 1\n' > "$RUNNER_TEMP/code"
+            sudo mkdir -p /usr/local/bin
+            sudo install -m 755 "$RUNNER_TEMP/code" /usr/local/bin/code
+          fi
+
       - name: containment suite with coverage
         working-directory: containment/go
         shell: bash # -eo pipefail: the step fails when go test does, through the pipe
-        run: go test -count=1 -skip "$SKIP" -coverpkg=./... -coverprofile="$GITHUB_WORKSPACE/coverage.out" ./... 2>&1 | tee "$RUNNER_TEMP/suite.txt"
+        run: |
+          # TestLocalOnlySabotage, TestNonetSabotage: the runner passes open sockets to each step
+          # (descriptors 131 and 140), and the launchers' prove step rightly refuses inherited
+          # sockets. Close every descriptor above stderr but 255, bash's handle on this script.
+          for fd in /dev/fd/*; do
+            n=${fd##*/}
+            if [ "$n" -gt 2 ] && [ "$n" -ne 255 ]; then eval "exec $n>&-"; fi
+          done
+          go test -count=1 -skip "$SKIP" -coverpkg=./... -coverprofile="$GITHUB_WORKSPACE/coverage.out" ./... 2>&1 | tee "$RUNNER_TEMP/suite.txt"
 
       # The failing tests as a PR comment, readable without the job log.
       - name: post the failing tests on the PR
