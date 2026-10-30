@@ -197,6 +197,24 @@ func TestHookProcessReaders(t *testing.T) {
 	if why != "" || program != "/bin/sleep" || cwd != directory {
 		t.Errorf("readProcess: %q %q %q, want /bin/sleep in %s", program, cwd, why, directory)
 	}
+	// Started by a relative path through a link named d1-sleep: the executable is still the file the
+	// kernel ran, not ps's "./d1-sleep", which the hook resolved against its own directory (so a
+	// project program started as ./testbin/x was refused) and whose d1- name made any linked program
+	// look like this project's.
+	if err := os.Symlink("/bin/sleep", filepath.Join(directory, "d1-sleep")); err != nil {
+		t.Fatal(err)
+	}
+	relative := exec.Command("./d1-sleep", "300")
+	relative.Dir = directory
+	if err := relative.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { relative.Process.Kill(); relative.Wait() })
+	time.Sleep(100 * time.Millisecond)
+	program, cwd, why = readProcess(relative.Process.Pid)
+	if why != "" || program != "/bin/sleep" || cwd != directory {
+		t.Errorf("readProcess, started as ./d1-sleep: %q %q %q, want /bin/sleep in %s", program, cwd, why, directory)
+	}
 	pids, err := pgrep([]string{"-x", "sleep"})
 	if err != nil || !slices.Contains(pids, command.Process.Pid) {
 		t.Errorf("pgrep -x sleep: %v %v, want %d among them", pids, err, command.Process.Pid)

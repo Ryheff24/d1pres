@@ -438,23 +438,35 @@ func projectProcess(pid int, root string) string {
 	return ""
 }
 
-// readProcess returns a process's executable (ps) and working directory (lsof), or why it cannot.
-// A variable so the rules are tested without real processes: inside d1-nonet's profile ps sees none.
+// readProcess returns a process's executable and working directory, or why it cannot. Both come from
+// lsof: the executable is its first txt entry, the file the kernel ran, by absolute path with links
+// resolved. ps reports the path as it was spelled at exec (./testbin/x, relative to a directory the
+// hook does not know) and a link's own name (a link named d1-x to any program), so it only says
+// whether the process runs and names it in refusals. A variable so the rules are tested without real
+// processes: inside d1-nonet's profile ps sees none.
 var readProcess = func(pid int) (string, string, string) {
-	executable, err := exec.Command("/bin/ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+	spelled, err := exec.Command("/bin/ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return "", "", "which is not running"
 	}
-	program := strings.TrimSpace(string(executable))
-	output, err := exec.Command("/usr/sbin/lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
+	name := strings.TrimSpace(string(spelled))
+	output, err := exec.Command("/usr/sbin/lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd,txt", "-Ffn").Output()
 	if err != nil {
-		return "", "", program + ", whose working directory cannot be read"
+		return "", "", name + ", whose working directory cannot be read"
 	}
-	directory := ""
+	program, directory, descriptor := "", "", ""
 	for _, line := range strings.Split(string(output), "\n") {
-		if strings.HasPrefix(line, "n") {
+		switch {
+		case strings.HasPrefix(line, "f"):
+			descriptor = line[1:]
+		case strings.HasPrefix(line, "n") && descriptor == "cwd":
 			directory = line[1:]
+		case strings.HasPrefix(line, "n") && descriptor == "txt" && program == "":
+			program = line[1:]
 		}
+	}
+	if program == "" {
+		return "", "", name + ", whose executable cannot be read"
 	}
 	return program, directory, ""
 }
