@@ -101,7 +101,8 @@ func Decide(raw []byte, projectDirectory string, config Config) string {
 }
 
 // decideBash: a game binary named without the launcher is refused from any session. In sessions
-// in, inside or above this repository, a command naming one of the owner's excluded programs is
+// in, inside or above this repository, a read-only log or profiler command is decided by
+// ProfilerForm for every model (profiler.go); a command naming one of the owner's excluded programs is
 // for elevated models only and must be that command alone, and then skips the tripwire (the
 // program runs outside the sandbox by the owner's choice, and a heredoc body is its data: codex
 // prompts name protected files); any other command naming a protected file must be a pure read
@@ -122,6 +123,12 @@ func decideBash(call event, input toolInput, directories []string, config Config
 	}
 	if isCompanion(code) {
 		return CompanionForm(command)
+	}
+	if RoutesToProfiler(code) {
+		if why := ProfilerForm(command, config.Root); why != "" {
+			return why
+		}
+		return Tripwire(command)
 	}
 	if excluded := firstWordMatching(code, isExcludedName); excluded != "" {
 		if elevated, because := Elevated(call, config); !elevated {

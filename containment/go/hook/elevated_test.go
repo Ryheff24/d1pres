@@ -297,7 +297,7 @@ func TestHookElevatedForm(t *testing.T) {
 		{"code", "names no file"},
 		{"nettop", "logging mode"},
 		{"top", "logging mode"},
-		{"sample 1 5 -file /tmp/x", "writes a file"},
+		{"leaks 1 --outputGraph /tmp/x", "writes a file"},
 		{"leaks --atExit -- /bin/sh", "writes a file, opens an app or starts a program"},
 		{"ps aux | sort", "after \"|\" only"},
 		{"kill " + ours + " | head", "only an inspecting tool's output"},
@@ -368,10 +368,13 @@ func TestHookRecordEdits(t *testing.T) {
 }
 
 // TestHookXcrun: xcrun is for elevated sessions only, and then only queries the SDK or starts
-// simctl, devicectl and xctrace, and xctrace never launches a program. Control: a limited session is
-// refused even the queries.
+// simctl and devicectl; xctrace through xcrun is refused for every model (ProfilerForm runs it at its
+// own path, profiler.go). Control: a limited session is refused even the queries.
 func TestHookXcrun(t *testing.T) {
 	config := fakeTree(t)
+	if err := os.MkdirAll(filepath.Join(config.Root, "runs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	opus := writeTranscript(t, config, "opus.jsonl", assistant("claude-opus-5-5"))
 	deepseek := writeTranscript(t, config, "deepseek.jsonl", assistant("deepseek/deepseek-v4.1-flash-1017"))
 	if why := Decide(sessionBash(t, "xcrun --show-sdk-path", false, config.Root, deepseek), config.Root, config); !strings.Contains(why, "only elevated models") {
@@ -383,12 +386,14 @@ func TestHookXcrun(t *testing.T) {
 		"xcrun -f clang":                     "",
 		"xcrun simctl list":                  "",
 		"xcrun devicectl list devices":       "",
-		"xcrun xctrace record --template 'Time Profiler' --attach 123 --time-limit 10s": "",
-		"xcrun xctrace record --launch -- /bin/sh":                                      "xctrace --launch",
-		"xcrun xctrace record --launch=/bin/sh":                                         "xctrace --launch",
-		"xcrun python3 -c 'print(1)'":                                                   "only queries the SDK or starts",
-		"xcrun swift run":                                                               "only queries the SDK or starts",
-		"xcrun --sdk macosx clang -fplugin=/x.dylib":                                    "only queries the SDK",
+		"/usr/bin/xcrun xctrace record --template 'Time Profiler' --attach 123 --time-limit 10s --output " + config.Root + "/runs/t.trace": "its own path",
+		"xcrun xctrace record --template 'Time Profiler' --attach 123 --time-limit 10s":                                                    "its own path",
+		"/usr/bin/xcrun xctrace record --launch -- /bin/sh":                                                                                "its own path",
+		"/usr/bin/xcrun xctrace record --launch=/bin/sh":                                                                                   "its own path",
+		"xcrun --sdk macosx xctrace record --launch -- /bin/sh":                                                                            "its own path",
+		"xcrun python3 -c 'print(1)'":                                                                                                      "only queries the SDK or starts",
+		"xcrun swift run":                                                                                                                  "only queries the SDK or starts",
+		"xcrun --sdk macosx clang -fplugin=/x.dylib":                                                                                       "only queries the SDK",
 		"xcrun": "only queries the SDK or starts",
 	}
 	for command, reason := range cases {

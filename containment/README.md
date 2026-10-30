@@ -180,9 +180,13 @@ that bind and connections to it from the network (`TestLocalOnlyBinds` measures 
 What the hook does (`hook/`): a Bash call with the sandbox off passes only as one plain command,
 `D1_*=value ... /usr/local/libexec/d1-agent/d1-nonet <root>/d1-server/target/release/<game binary>
 ARGS` or `.../d1-localonly /abs/program ARGS`, from a root-owned install; a game binary named
-without `d1-nonet` is refused from any session; a command naming one of your excluded programs
-(`xcrun`, `xcodebuild`, `codesign`, `security`, `system_profiler`, `log show|stream`, `codex exec`, `copilot -p` never with `--allow-all*` or `--yolo`)
-passes only as that one command, heredoc and redirections allowed, nothing chained; a command
+without `d1-nonet` is refused from any session; the read-only logs and profilers (`log show|stream`,
+`xctrace export|list`, `sample`, `vmmap`, `footprint`, `malloc_history`, `metalperftrace
+overview|listen`) pass for every model only as `ProfilerForm` (`hook/profiler.go`) admits: at
+their own path, one line of literal words, listed options, this project's PIDs, no output files; a
+command naming one of your other excluded programs
+(`xcrun`, `xcodebuild`, `codesign`, `security`, `system_profiler`, `codex exec`, `copilot -p` never with `--allow-all*` or `--yolo`)
+passes only as that one command, heredoc and redirections allowed, no `#` comment, nothing chained; a command
 whose text names a protected file passes only as a pure read (no `; & > < $(` backquote, newline
 or `tee`, every `|` segment a reading program), a spelling-based tripwire that an excluded
 program run alone skips, so codex prompts may name those files; edits of the

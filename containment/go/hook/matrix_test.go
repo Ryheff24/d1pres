@@ -57,6 +57,17 @@ func TestAccessMatrix(t *testing.T) {
 	program := filepath.Join(config.Root, "testbin", "d1sleeper")
 	writeTree(t, config.Root, []string{"testbin/d1sleeper"})
 	writeTree(t, config.Home, []string{".codex/sessions/2026/keep"})
+	runs := filepath.Join(config.Root, "runs")
+	if err := os.MkdirAll(runs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(config.Home, filepath.Join(runs, "out")); err != nil {
+		t.Fatal(err)
+	}
+	trace, outside := filepath.Join(runs, "t.trace"), filepath.Join(config.Home, "x")
+	writeTree(t, config.Root, []string{"runs/t.trace"})
+	writeTree(t, config.Home, []string{"x"})
+	xt := "/Applications/Xcode.app/Contents/Developer/usr/bin/xctrace"
 	readProcess = func(pid int) (string, string, string) {
 		switch pid {
 		case 4001:
@@ -91,9 +102,87 @@ func TestAccessMatrix(t *testing.T) {
 		{"Codex through", "bash", companion + " task x", "", ""},
 		{"Codex through", "bash", companion + " review", "reviews start ephemeral threads", "reviews start ephemeral threads"},
 		{"The owner's sandbox-excluded", "bash", "xcodebuild -version", "", onlyElevated},
-		{"The owner's sandbox-excluded", "bash", "log show --last 1m", "", onlyElevated},
 		{"The owner's sandbox-excluded", "bash", "codex exec -s read-only x", "", onlyElevated},
 		{"The owner's sandbox-excluded", "bash", "copilot -p x --allow-all", "never --allow-all", onlyElevated},
+		{"The owner's sandbox-excluded", "bash", "copilot -p x --allow-a\\\nll", "never --allow-all", onlyElevated},
+		{"The owner's sandbox-excluded", "bash", "xcodebuild -version # <<'EOF'\n/usr/bin/touch /tmp/owned\nEOF", "starts a comment", onlyElevated},
+		// Read-only logs and profilers (profiler.go): the admitted forms for both kinds of session,
+		// sandbox on and off, then every form the two 2026-10-28 reviews found, refused for both.
+		{"Read-only logs", "bash", "/usr/bin/log show --last 1m --style compact", "", ""},
+		{"Read-only logs", "off", "/usr/bin/log stream --process d1-recomp --level debug --timeout 5s", "", ""},
+		{"Read-only logs", "off", xt + " export --input " + trace + " --xpath '/trace-toc/run[@number=\"1\"]/data/table[@schema=\"time-profile\"]'", "", ""},
+		{"Read-only logs", "bash", xt + " list templates", "", ""},
+		{"Read-only logs", "off", "/usr/bin/sample 4001 5 -mayDie", "", ""},
+		{"Read-only logs", "bash", "/usr/bin/sample 4001 5 1", "", ""},
+		{"Read-only logs", "off", "/usr/bin/vmmap -summary 4001", "", ""},
+		{"Read-only logs", "off", "/usr/bin/footprint --format formatted 4001", "", ""},
+		{"Read-only logs", "off", "/usr/bin/malloc_history 4001 -allBySize", "", ""},
+		{"Read-only logs", "off", "/usr/bin/metalperftrace overview " + trace, "", ""},
+		{"Read-only logs", "off", "/usr/bin/metalperftrace listen --pid 4001 --json", "", ""},
+		{"Read-only logs", "off", "'/usr/bin/sample' 4001", "", ""},
+		// review 1: a comment, quotes, continuations, outputs, redirections, bare names
+		{"Read-only logs", "off", "/usr/bin/log show --last 1m # <<'EOF'\nexec /usr/bin/touch /tmp/owned\nEOF", "one line", "one line"},
+		{"Read-only logs", "off", "/usr/bin/log show --last 1m # \\\n/usr/bin/touch /tmp/owned", "one line", "one line"},
+		{"Read-only logs", "off", "/usr/bin/log show --last 1m #x", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", xt + " record --template 'Time Profiler' '--launch' -- /bin/sh -c 'exec /usr/bin/true' --attach", "is not one of the admitted", "is not one of the admitted"},
+		{"Read-only logs", "off", xt + " record --template 'Time Profiler' --attach 4001 --output " + runs + "/a.trace", "is not one of the admitted", "is not one of the admitted"},
+		{"Read-only logs", "off", "/usr/bin/sample 4001 1 '-file' /tmp/owned", "-file is not admitted", "-file is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/sample 4001 1 '-e'", "-e is not admitted", "-e is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/sample 4001 1 -fi''le /tmp/owned", "-file is not admitted", "-file is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/sample 4001 1 -fi\\\nle /tmp/owned", "one line", "one line"},
+		{"Read-only logs", "off", "/usr/bin/sample 4001 1 -file=/tmp/owned", "-file is not admitted", "-file is not admitted"},
+		{"Read-only logs", "off", xt + " export --input " + trace + " --toc --output " + runs + "/a.xml", "--output is not admitted", "--output is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/footprint --json " + runs + "/f.json 4001", "--json is not admitted", "--json is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/metalperftrace collect --last 5m " + runs + "/mpt", "is not one of the admitted", "is not one of the admitted"},
+		{"Read-only logs", "off", "/usr/bin/metalperftrace listen --pid 4001 --output " + runs + "/l.txt", "--output is not admitted", "--output is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/log show --last 1m 3< /dev/tcp/example.com/443", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", "/usr/bin/log show --last 1m <<< x", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", "/usr/bin/log show --last 1m > x", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", "/usr/bin/log show --last 1m & /usr/bin/touch /tmp/owned", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", "/usr/bin/vmmap 4001 | head", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", "/usr/bin/vmmap 4001; curl x", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", "/usr/bin/vmmap $PPID", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", "/usr/bin/vmmap \"4001\"", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", "/usr/bin/vmmap ~/x", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", "/usr/bin/vmmap 40*", "shell syntax", "shell syntax"},
+		{"Read-only logs", "off", "sample 4001 1", "its own path", "its own path"},
+		{"Read-only logs", "off", "/tmp/sample 4001", "its own path", "its own path"},
+		{"Read-only logs", "off", "PATH=/tmp sample 4001", "its own path", "its own path"},
+		{"Read-only logs", "off", "/usr/bin/log show --pager", "--pager is not admitted", "--pager is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/log stream --predicate 'process == \"x\"'", "--predicate is not admitted", "--predicate is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/log collect --output " + runs + "/x", "is not one of the admitted", "is not one of the admitted"},
+		{"Read-only logs", "off", "/usr/bin/footprint --forkCorpse 4001", "--forkCorpse is not admitted", "--forkCorpse is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/vmmap -forkCorpse 4001", "-forkCorpse is not admitted", "-forkCorpse is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/metalperftrace setup --pid 4001", "is not one of the admitted", "is not one of the admitted"},
+		{"Read-only logs", "bash", "/usr/bin/sample 4001 1 '-file' " + notes, "-file is not admitted", "-file is not admitted"},
+		// review 2: xcrun routes, the companion's fake heredoc, inputs, heap contents, other processes
+		{"Read-only logs", "off", "/usr/bin/xcrun xctrace\\\n record --template 'Time Profiler' '--launch' -- /usr/bin/true", "one line", "one line"},
+		{"Read-only logs", "off", "/usr/bin/xcrun xctrace list templates", "its own path", "its own path"},
+		{"Read-only logs", "off", "xcrun 'xctrace' list templates", "its own path", "its own path"},
+		{"Read-only logs", "off", companion + " status # <<'EOF'\n/usr/bin/sample 4001 1 -e\nEOF", "starts a comment", "starts a comment"},
+		{"Read-only logs", "off", "/usr/bin/malloc_history 4001 -callTree -showContent", "-showContent is not admitted", "-showContent is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/malloc_history " + outside + " -callTree", "PID", "PID"},
+		{"Read-only logs", "off", "/usr/bin/log show --archive " + outside, "--archive is not admitted", "--archive is not admitted"},
+		{"Read-only logs", "off", xt + " export --input " + outside + " --toc", "not a file inside", "not a file inside"},
+		{"Read-only logs", "off", xt + " export --input " + runs + "/out/x --toc", "not a file inside", "not a file inside"},
+		{"Read-only logs", "off", xt + " export --input " + runs + "/../" + filepath.Base(trace) + " --toc", "without ..", "without .."},
+		{"Read-only logs", "off", "/usr/bin/metalperftrace overview " + outside, "not a file inside", "not a file inside"},
+		{"Read-only logs", "off", "/usr/bin/vmmap " + outside, "PID", "PID"},
+		{"Read-only logs", "off", "/usr/bin/sample 4003 5", "only at this project's processes", "only at this project's processes"},
+		{"Read-only logs", "off", "/usr/bin/sample Safari 5", "PID", "PID"},
+		{"Read-only logs", "off", "/usr/bin/sample 4001 3600 1 -wait", "-wait is not admitted", "-wait is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/footprint --all --sample 0.5", "--all is not admitted", "--all is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/footprint --proc Safari", "--proc is not admitted", "--proc is not admitted"},
+		{"Read-only logs", "off", "/usr/bin/metalperftrace listen --process Safari", "--process is not admitted", "--process is not admitted"},
+		{"Read-only logs", "off", xt + " export --input --toc", "needs a value", "needs a value"},
+		{"Read-only logs", "off", xt + " export --input " + trace + " --input " + trace, "appears twice", "appears twice"},
+		{"Read-only logs", "off", "/usr/bin/log show --style ''", "an empty value", "an empty value"},
+		{"Read-only logs", "off", "/usr/bin/sample 4001 5x", "a number", "a number"},
+		{"Read-only logs", "off", "/usr/bin/vmmap 4001 12", "an address", "an address"},
+		{"Read-only logs", "off", "/usr/bin/log show '", "unclosed quote", "unclosed quote"},
+		{"Read-only logs", "off", "/usr/bin/log show '\tx'", "printable ASCII", "printable ASCII"},
+		{"Read-only logs", "off", "/usr/bin/log show --last 1m\r", "one line", "one line"},
+		{"Read-only logs", "off", "/usr/bin/log show --last 1m\x00", "shell syntax", "shell syntax"},
 		{"security", "bash", "security find-identity -p codesigning", "", onlyElevated},
 		{"security", "bash", "security find-generic-password -w -s x", "security find-identity", onlyElevated},
 		{"xcrun", "bash", "xcrun --show-sdk-path", "", onlyElevated},
@@ -101,7 +190,7 @@ func TestAccessMatrix(t *testing.T) {
 		{"Inspecting", "off", "/bin/ps aux | /usr/bin/grep d1 | /usr/bin/head -5", "", tool},
 		{"Inspecting", "off", "/usr/bin/nettop -l 1", "", tool},
 		{"Inspecting", "off", "/usr/bin/nettop", "logging mode", tool},
-		{"Inspecting", "off", "/usr/bin/sample 1 5 -file x", "writes a file", tool},
+		{"Inspecting", "off", "/usr/bin/leaks 1 --outputGraph x", "writes a file", tool},
 		{"Inspecting", "off", "/bin/ps aux > x", "is not allowed", tool},
 		{"Reading system state", "off", "/usr/sbin/sysctl -n vm.swapusage | /usr/bin/grep used", "", tool},
 		{"Reading system state", "off", "/usr/bin/pmset -g therm", "", tool},
