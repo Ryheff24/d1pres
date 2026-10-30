@@ -7,6 +7,9 @@
 # which the first run on main after this merges stores. Code that tests run only as built
 # binaries (cmd/*) is not counted.
 #
+# A failing test fails the suite step itself, so the red step is the one whose log names the
+# test; octocov still reports what ran.
+#
 # TestCGate* and TestBuiltGateStacks are skipped. They need d1preservation's root (design/,
 # d1-server/, the built Rust binaries), so install.sh runs them during d1 containment install.
 # SKIP is rootBoundControls in d1preservation's tools/d1; d1 containment pr refuses a workflow
@@ -46,21 +49,11 @@ jobs:
           cache: false
 
       - name: containment suite with coverage
-        id: suite
         working-directory: containment/go
-        run: |
-          set +e
-          go test -count=1 -skip "$SKIP" -coverpkg=./... -coverprofile="$GITHUB_WORKSPACE/coverage.out" ./...
-          echo "status=$?" >> "$GITHUB_OUTPUT"
+        run: go test -count=1 -skip "$SKIP" -coverpkg=./... -coverprofile="$GITHUB_WORKSPACE/coverage.out" ./...
 
       - uses: k1LoW/octocov-action@a167dc0dee441b7ffc45e1b862ab55ec0d87f278 # v1.5.2
         if: always() && hashFiles('coverage.out') != ''
         with:
           version: v0.83.0
           checksum: 668a3dbaa7e04dd2f2227d76250a42e1bc82712882caad4dc92df174fa1fb2f7 # octocov_v0.83.0_darwin_arm64.zip
-
-      - name: fail when the suite failed
-        if: steps.suite.outputs.status != '0'
-        run: |
-          echo "the suite failed (exit ${{ steps.suite.outputs.status }}); the coverage counts only what ran"
-          exit 1
