@@ -1,0 +1,18 @@
+# octocov: the containment suite's coverage on each PR (.github/workflows/coverage.yml runs it).
+# Reports are kept as this repository's own Actions artifacts; nothing goes to octocov.dev.
+coverage:
+  paths:
+    - coverage.out
+comment:
+  if: is_pull_request
+  updatePrevious: true
+  hideFooterLink: true
+summary:
+  hideFooterLink: true
+report:
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}
+diff:
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}
+viewer: artifact
