@@ -118,7 +118,14 @@ before the gate was hardened, not current code.
 ## How to run the controls
 
 In your own terminal, not from an agent (a Seatbelt profile cannot be applied inside the agent
-sandbox, so every Seatbelt test skips there):
+sandbox, so every Seatbelt test skips there), and **from the d1preservation checkout, not from
+d1remote** (measured 2026-10-31 in the owner's terminal): the C gate's write probes name `design/`,
+`d1-server/crates/` and `d1-server/crates/d1-recomp/src/main.rs`, which exist only there. Run from
+d1remote those probes get `ENOENT`, which the gate cannot distinguish from `EPERM`, so it fails
+closed and `TestCGateUnderPolicy`, `TestCGateDescriptors` and `TestCGateWrites` fail with "the
+profile applied but did not hold" — the gate is correct, the tree is wrong. `TestBuiltGateStacks`
+needs `d1-server`, which d1remote does not have at all. `hook`, `orkey` and `cmd/d1-orkey` pass in
+either repo, so a hook-only change can be checked here; the boundary cannot.
 
 ```sh
 cd containment/go && GOCACHE=$PWD/.gocache GOFLAGS=-mod=mod go test -count=1 ./...   # every control, none skipped
