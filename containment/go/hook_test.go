@@ -178,7 +178,18 @@ func TestHookBash(t *testing.T) {
 		{"node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs\" task x", true, inside, "runs only as node on its installed script"},
 		{"node other.js", true, inside, "is not a launcher"},
 		{"ls -la", false, inside, ""},
-		{"go test ./...", false, inside, ""},
+		// Tests run inside the game profile, and a plain "go test" inside the agent sandbox used to
+		// pass (audit 2026-10-31, N7). The build-then-launch forms stay admitted, below.
+		{"go test ./...", false, inside, "would run tests inside the agent sandbox"},
+		{"go test -run TestX ./internal/sched", false, inside, "would run tests inside the agent sandbox"},
+		{"cd tools/d1 && go test ./internal/...", false, inside, "would run tests inside the agent sandbox"},
+		{"cargo test -p d1-bap", false, inside, "would run tests inside the agent sandbox"},
+		{"cargo nextest run -p d1-bap", false, inside, "would run tests inside the agent sandbox"},
+		{"cargo bench -p d1-bap", false, inside, "would run tests inside the agent sandbox"},
+		{"go test ./...", false, outside, ""},
+		{"go build ./...", false, inside, ""},
+		{"go vet ./...", false, inside, ""},
+		{"cargo build -p d1-recomp", false, inside, ""},
 		{nonet, true, inside, "cannot be trusted"},
 		{"/usr/bin/true", true, inside, "is not a launcher"},
 		{"/usr/bin/true", true, outside, ""},
@@ -214,14 +225,31 @@ func TestHookBash(t *testing.T) {
 		{"codex login", true, inside, "only codex exec"},
 		{"/usr/bin/log erase --all", false, inside, "is not one of the admitted"},
 		{"log erase --all", false, inside, "its own path"},
-		{"copilot -p \"read the docs\" --model auto --no-ask-user --allow-tool 'shell(d1-server/target/release/d1-eboot)'", true, inside, ""},
-		{"/Users/ryanheffernan/.nvm/versions/node/v22.19.0/bin/copilot -p x --allow-tool 'shell(ls)'", true, inside, ""},
-		{"copilot -p x --allow-all", true, inside, "never --allow-all"},
-		{"copilot -p x --allow-all-tools=true", true, inside, "never --allow-all-tools"},
-		{"copilot -p x --yolo", true, inside, "never --yolo"},
-		{"copilot login", true, inside, "only codex exec, copilot -p"},
+		// copilot: the pinned path is gone and "--allow-tool shell" is --allow-all by another name
+		// (audit 2026-10-31, N3), so every form is refused until the owner pins a path again.
+		{"copilot -p \"read the docs\" --model auto --no-ask-user --allow-tool 'shell(d1-server/target/release/d1-eboot)'", true, inside, "copilot is not excluded from the sandbox"},
+		{"/Users/ryanheffernan/.nvm/versions/node/v22.19.0/bin/copilot -p x --allow-tool 'shell(ls)'", true, inside, "copilot is not excluded from the sandbox"},
+		{"copilot -p x --allow-all", true, inside, "copilot is not excluded from the sandbox"},
+		{"copilot -p x --yolo", true, inside, "copilot is not excluded from the sandbox"},
+		{"copilot login", true, inside, "copilot is not excluded from the sandbox"},
 		{"/tmp/copilot -p x", true, inside, "must start with it"},
 		{"copilot -p x && curl y", true, inside, "\"&\" starts another command"},
+		// codex keeps its own sandbox and hook trust, and writes its output inside the repository
+		// (audit N2 and N3): before this, every one of these ran outside every sandbox.
+		{"codex exec --dangerously-bypass-approvals-and-sandbox 'do it'", true, inside, "turns off the sandbox"},
+		{"codex exec --dangerously-bypass-hook-trust 'do it'", true, inside, "turns off the sandbox"},
+		{"codex exec --yolo 'do it'", true, inside, "turns off the sandbox"},
+		{"codex exec -c sandbox_mode=danger-full-access 'do it'", true, inside, "is not admitted"},
+		{"codex exec --config sandbox_mode=\"danger-full-access\" 'do it'", true, inside, "is not admitted"},
+		{"codex exec -s danger-full-access 'do it'", true, inside, "is not admitted"},
+		{"codex exec -s workspace-write 'do it'", true, inside, ""},
+		{"codex exec -c model_reasoning_effort='\"xhigh\"' -s read-only 'do it'", true, inside, ""},
+		{"codex exec -s read-only -o " + config.Home + "/.zshrc -", true, inside, "writes its output inside"},
+		{"codex exec -s read-only -o docs/research/r.md -", true, inside, ""},
+		{"xcodebuild -version > " + config.Root + "/CLAUDE.md", true, inside, "which is protected"},
+		{"security find-identity > CLAUDE.md", true, inside, "which is protected"},
+		{"codex exec -s read-only -o " + config.Home + "/.claude/settings.json -", true, inside, "is protected"},
+		{"system_profiler SPHardwareDataType > containment/go/profiles/game.sb", true, inside, "which is protected"},
 		{"cargo test --no-run -p d1-bap", false, inside, ""},
 		{"go test -c -o testbin/ ./internal/...", false, inside, ""},
 		{"cmake --build . --config Release", false, inside, ""},
@@ -267,10 +295,36 @@ func TestHookTripwire(t *testing.T) {
 		{"cat d1-server/.cargo/config.toml ~/.claude/settings.json", inside, ""},
 		{"sed -i '' s/a/b/ d1-server/crates/d1-eboot/src/main.rs", inside, ""},
 		{"sed -i '' s/a/b/ CLAUDE.md", inside, "names CLAUDE.md, " + refused},
-		{"python3 - <<'EOF'\nopen('CLAUDE.md', 'w')\nEOF", inside, "names CLAUDE.md, " + refused + " (it contains \"<\")"},
-		{"python3 -c \"open('CLAUDE.md', 'w')\"\n", inside, "it contains \"\\n\""},
+		{"python3 - <<'EOF'\nopen('CLAUDE.md', 'w')\nEOF", inside, "names CLAUDE.md, " + refused + " (\"<\" reads a file"},
+		{"python3 -c \"open('CLAUDE.md', 'w')\"\n", inside, "a newline, so a second command or a heredoc"},
 		{"echo x > containment/c/d1netgate.c", inside, "names containment/c/d1netgate.c, " + refused},
-		{"cat notes.md | tee CLAUDE.md", inside, "it contains \"tee\""},
+		{"cat notes.md | tee CLAUDE.md", inside, "\"tee\" writes a file"},
+		{"cat /usr/bin/tee CLAUDE.md", inside, "\"tee\" writes a file"},
+		// Read as bash reads it (F5 of the 2026-10-27 review): a quoted or escaped pipe is text, a
+		// descriptor merge writes no file, and "tee" inside a word is not tee. Each of these was
+		// refused before, and 438 of 849 refusals in the logs were of this kind.
+		{"grep -n -E 'alpha|beta' containment/c/d1netgate.c | head", inside, ""},
+		{"grep -n 'a|b' CLAUDE.md", inside, ""},
+		{"grep -n a\\|b CLAUDE.md", inside, ""},
+		{"grep -n steering containment/agent-containment.md", inside, ""},
+		{"grep -c committee CLAUDE.md", inside, ""},
+		{"cat CLAUDE.md 2>&1 | head -40", inside, ""},
+		{"git -C " + inside + " log --oneline -3 -- containment/go 2>&1 | wc -l", inside, ""},
+		{"grep -rn \"d1-nonet\" containment/go | head", inside, ""},
+		{"grep -n 'x' CLAUDE.md | tee out.txt", inside, "\"tee\" writes a file"},
+		{"cat CLAUDE.md > out.txt", inside, "\">\" writes a file"},
+		{"cat CLAUDE.md && rm -rf x", inside, "\"&\" starts another command"},
+		{"cat CLAUDE.md || true", inside, "\"||\" starts another command"},
+		{"cat \"$(ls CLAUDE.md)\"", inside, "\"$(\" runs another command"},
+		{"cat 'CLAUDE.md", inside, "an unclosed quote"},
+		// The protected trees: a file nobody listed, and the tree's own path (audit N1 and N4).
+		{"echo x > containment/go/hook/planted_test.go", inside, "names containment/go, " + refused},
+		{"cp /tmp/x containment/go/go.mod", inside, "names containment/go, " + refused},
+		{"echo x > .claude/hooks/owner-inbox.sh", inside, "names .claude/hooks, " + refused},
+		{"cp /tmp/x .git/hooks/pre-commit", inside, "names .git/hooks, " + refused},
+		{"chmod +x .git/hooks/post-checkout", inside, "names .git/hooks, " + refused},
+		{"cat containment/go/hook/matrix.go", inside, ""},
+		{"ls -la containment/go/hook", inside, ""},
 		{"sed -i '' s/a/b/ Claude.MD", inside, "names CLAUDE.md, " + refused},
 		{"perl -pi -e s/a/b/ ~/.claude/settings.json", inside, "names .claude/settings.json, " + refused},
 		{"perl -pi -e s/a/b/ d1-server/.cargo/config.toml", inside, "names d1-server/.cargo/config.toml, " + refused},
@@ -279,7 +333,6 @@ func TestHookTripwire(t *testing.T) {
 		{"rg --pre sh x CLAUDE.md", inside, refused},
 		{"PATH=/private/tmp/x cat CLAUDE.md", inside, refused},
 		{"/private/tmp/x/cat CLAUDE.md", inside, refused},
-		{"grep 'a|b' CLAUDE.md", inside, refused},
 		{"sed -i '' s/a/b/ " + outside + "/other/claude.md", outside, ""},
 		{"git -C " + inside + " log --oneline -3 -- containment/c/d1netgate.c", inside, ""},
 		{"git show HEAD:CLAUDE.md", inside, ""},
@@ -299,8 +352,14 @@ func TestHookTripwire(t *testing.T) {
 		if test.reason == "" && why != "" || test.reason != "" && !strings.Contains(why, test.reason) {
 			t.Errorf("%q (in %s): wanted %q, got %q", test.command, test.cwd, test.reason, why)
 		}
-		if test.reason != "" && !strings.Contains(test.reason, "program alone") && !strings.Contains(why, "show the owner the change instead (containment/agent-containment.md, point 5)") {
-			t.Errorf("%q: the refusal does not say to show the owner the change: %q", test.command, why)
+		// Every tripwire refusal states the allowed form, not only the doc: the reading programs and
+		// the Read tool, then the two ways to change the file (F7 of the 2026-10-27 review).
+		if test.reason != "" && !strings.Contains(test.reason, "program alone") {
+			for _, wanted := range []string{"To read it: the Read tool", "cat, head, tail, grep", "To change it: show the owner the change (containment/agent-containment.md, point 5)", "scratchpad window directory"} {
+				if !strings.Contains(why, wanted) {
+					t.Errorf("%q: the refusal does not say %q: %q", test.command, wanted, why)
+				}
+			}
 		}
 	}
 }
@@ -339,7 +398,32 @@ func TestHookEdits(t *testing.T) {
 			t.Errorf("%s of %s relative to the repository was not refused: %q", tool, relative, why)
 		}
 	}
-	for _, path := range []string{config.Root + "/notes.md", config.Root + "/Containment/Notes.md", config.Root + "/containment/go/new.go", base + "/repo-link/new.md", config.Home + "/.claude/projects/repo/memory/fact.md"} {
+	// The protected trees: a file nobody has listed yet, in the tree or in a worktree's copy of it,
+	// is refused as well (audit 2026-10-31, N1, N4 and N6). install.sh builds and tests
+	// containment/go as the owner, and git and Claude Code run what is in a hooks directory.
+	trees := []string{
+		config.Root + "/containment/go/new.go",
+		config.Root + "/containment/go/hook/planted_test.go",
+		config.Root + "/containment/go/go.mod",
+		config.Root + "/containment/go/.gocache/00/x-a",
+		config.Root + "/Containment/GO/hook/Matrix.go",
+		config.Root + "/containment/c/extra.c",
+		config.Root + "/.claude/hooks/owner-inbox.sh",
+		config.Root + "/.git/hooks/pre-commit",
+		config.Root + "/.claude/worktrees/wt1/d1-server/crates/d1-recomp/src/main.rs",
+		config.Root + "/.claude/worktrees/wt1/containment/go/hook/hook.go",
+		config.Root + "/runs/wt-gfx/d1-server/crates/d1-recomp/build.rs",
+		config.Root + "/runs/wt-gfx/CLAUDE.md",
+	}
+	for _, path := range trees {
+		why := hook.Decide(editEvent(t, "Edit", path, "/"), "", config)
+		if !strings.Contains(why, "Edit of "+path+" refused: ") {
+			t.Errorf("an edit of %s was not refused: %q", path, why)
+		}
+	}
+	for _, path := range []string{config.Root + "/notes.md", config.Root + "/Containment/Notes.md", config.Root + "/containment/reviews/new.md",
+		config.Root + "/runs/hookstage/notes.md", config.Root + "/.claude/worktrees/wt1/spec/README.md", config.Root + "/runs/wt-gfx/tools/d1/main.go",
+		base + "/repo-link/new.md", config.Home + "/.claude/projects/repo/memory/fact.md"} {
 		why := hook.Decide(editEvent(t, "Edit", path, "/"), "", config)
 		if why != "" {
 			t.Errorf("an edit of %s was refused: %q", path, why)
@@ -367,6 +451,8 @@ func TestHookPatches(t *testing.T) {
 		"delete":              patch("*** Delete File: containment/go/profiles/game.sb"),
 		"rename onto":         patch("*** Update File: notes.md", "*** Move to: containment/c/d1netgate.c", "@@", "-a", "+b"),
 		"second of two files": patch("*** Update File: notes.md", "@@", "-a", "+b", "*** Update File: containment/go/gate/local.go", "@@", "-a", "+b"),
+		"a file in a tree":    patch("*** Add File: containment/go/hook/planted_test.go", "+package hook"),
+		"a worktree's copy":   patch("*** Update File: .claude/worktrees/wt1/containment/c/d1netgate.c", "@@", "-a", "+b"),
 		"other case":          patch("*** Update File: Claude.MD", "@@", "-a", "+b"),
 		"owner settings":      patch("*** Update File: "+config.Home+"/.claude/settings.json", "@@", "-a", "+b"),
 	}
@@ -378,7 +464,7 @@ func TestHookPatches(t *testing.T) {
 	}
 	admitted := map[string]string{
 		"one file":         patch("*** Update File: notes.md", "@@", "-a", "+b"),
-		"new file":         patch("*** Add File: containment/go/new.go", "+package netguard"),
+		"new file":         patch("*** Add File: containment/reviews/new.md", "+text"),
 		"marker in a hunk": patch("*** Update File: notes.md", "@@", "-old", "+*** Update File: CLAUDE.md"),
 	}
 	for name, text := range admitted {
@@ -414,8 +500,70 @@ func TestHookFailsClosed(t *testing.T) {
 			t.Errorf("the event %q was admitted", raw)
 		}
 	}
-	if hook.Decide([]byte(`{"tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"/"}`), config.Root, config) != "" {
-		t.Error("the positive control, a plain sandboxed ls, was refused")
+	if hook.Decide([]byte(`{"tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"/","model":"gpt-6.1-sol"}`), config.Root, config) != "" {
+		t.Error("the positive control, a plain sandboxed ls from a harness that sandboxes it, was refused")
+	}
+}
+
+// TestHookHarnesses: the event shapes the hook reads, and what each one gets. Claude Code and Codex
+// say which sandbox a call runs in (transcript_path, model), so their sandboxed calls pass. Cursor
+// says nothing and sandboxes nothing: its two spellings of PreToolUse, its native
+// beforeShellExecution with the command at the top level, and its Shell tool name are all read, and
+// every command from them is decided as if the sandbox were off (the 2026-10-27 review, §2; the
+// owner's flag on Decide). An event the hook cannot place is still refused.
+func TestHookHarnesses(t *testing.T) {
+	config := fakeHookTree(t)
+	nonet := config.LauncherDirectory + "/d1-nonet " + config.Root + "/testbin/server.test"
+	cases := []struct {
+		name, raw, reason string
+	}{
+		{"Claude Code, sandboxed", `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"` + config.Root + `","transcript_path":"/nowhere/t.jsonl"}`, ""},
+		{"Codex, sandboxed", `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"` + config.Root + `","model":"gpt-6.1-sol"}`, ""},
+		{"Cursor, Claude-hook import", `{"hook_event_name":"preToolUse","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":""}`, "is not a launcher"},
+		{"Cursor, Shell tool", `{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"ls"},"cwd":""}`, "is not a launcher"},
+		{"Cursor, native event", `{"hook_event_name":"beforeShellExecution","command":"ls","cwd":""}`, "is not a launcher"},
+		{"Cursor, native event, launcher", `{"hook_event_name":"beforeShellExecution","command":"` + nonet + `","cwd":""}`, "cannot be trusted"},
+		{"Cursor, native event, game binary", `{"hook_event_name":"beforeShellExecution","command":"d1-recomp run","cwd":""}`, "runs game code"},
+		{"Cursor, protected file", `{"hook_event_name":"beforeShellExecution","command":"sed -i '' s/a/b/ CLAUDE.md","cwd":"` + config.Root + `"}`, "which is protected"},
+		{"an event this hook does not decide", `{"hook_event_name":"afterFileEdit","tool_name":"Bash","tool_input":{"command":"ls"}}`, "and was sent afterFileEdit"},
+		{"a tool this hook does not decide", `{"hook_event_name":"preToolUse","tool_name":"WebFetch","tool_input":{"url":"x"}}`, "and was sent \"WebFetch\""},
+	}
+	for _, test := range cases {
+		why := hook.Decide([]byte(test.raw), config.Root, config)
+		if test.reason == "" && why != "" || test.reason != "" && !strings.Contains(why, test.reason) {
+			t.Errorf("%s: wanted %q, got %q", test.name, test.reason, why)
+		}
+		if strings.Contains(test.name, "Cursor") && test.reason == "is not a launcher" && !strings.Contains(why, "neither transcript_path nor model") {
+			t.Errorf("%s: the refusal does not say why the call is treated as unsandboxed: %q", test.name, why)
+		}
+	}
+}
+
+// TestHookReachesIn: a session working elsewhere meets this repository's rules when the command
+// spells its root, and nothing else changes for it (audit 2026-10-31, N9, and F2 of 2026-10-27:
+// a sandbox-off "cp x <repo>/CLAUDE.md" from another project passed).
+func TestHookReachesIn(t *testing.T) {
+	config := fakeHookTree(t)
+	outside := config.Home // a sibling of the repository: neither inside it nor above it
+	cases := []struct {
+		command    string
+		sandboxOff bool
+		reason     string
+	}{
+		{"cp x " + config.Root + "/CLAUDE.md", true, "which is protected"},
+		{"cp x " + config.Root + "/CLAUDE.md", false, "which is protected"},
+		{"cat " + config.Root + "/CLAUDE.md", false, ""},
+		{"echo x > " + config.Root + "/containment/go/hook/planted_test.go", false, "which is protected"},
+		{"cd " + config.Root + "/tools/d1 && go test ./internal/...", false, "would run tests inside the agent sandbox"},
+		{"curl http://example.com", true, ""},
+		{"git push", true, ""},
+		{"cp x y", false, ""},
+	}
+	for _, test := range cases {
+		why := hook.Decide(bashEvent(t, test.command, test.sandboxOff, outside), outside, config)
+		if test.reason == "" && why != "" || test.reason != "" && !strings.Contains(why, test.reason) {
+			t.Errorf("%q (sandbox off %v, in %s): wanted %q, got %q", test.command, test.sandboxOff, outside, test.reason, why)
+		}
 	}
 }
 

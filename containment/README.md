@@ -154,7 +154,12 @@ overwrites them with main's. It stops before writing anything if `containment/go
 `containment/c` holds a file main lacks, because the build would use it. Then it runs the new
 `install.sh`. With `check` it only reports. Its log is `runs/containment-update-*.log`.
 
-`install.sh` alone installs what is already checked out:
+**Always `update.sh`, not `install.sh` (audit 2026-10-31, N4).** `install.sh` runs `go test ./...`
+and `go build` over whatever is in `containment/go` in your terminal, as you, so a file an agent
+left there runs as you. `update.sh` checks main out over the working tree and stops on any file
+under `containment/go` or `containment/c` that main lacks, which is the control that makes that
+safe; it then runs `install.sh` itself. Run `install.sh` alone only when you have just read
+`git status` for `containment/` yourself and it is clean:
 
 ```sh
 bash /Users/ryanheffernan/Documents/projects/d1preservation/containment/install.sh
@@ -167,11 +172,19 @@ everything already there, your `sandbox.excludedCommands` included; an earlier h
 replaced, not duplicated), and ends with `d1-agent-hook check`: every line must say OK. Running it
 again is harmless. The hook takes effect in new Claude Code sessions.
 
+It builds and caches in a directory it makes in your home (`~/.d1-agent-install.*`, removed when it
+ends), not in temporary space or in the repository: both launcher profiles allow writes under
+`/private/var/folders` and under the repository, so a game or server process running during an
+install could have replaced a built binary between `go build` and `sudo install`, or poisoned the
+build cache (audit 2026-10-31, N5).
+
 `settings` prints one `hooks.PreToolUse` entry (matcher `Bash|Edit|Write|MultiEdit|NotebookEdit`,
-command `/usr/local/libexec/d1-agent/d1-agent-hook`) and one `permissions.deny` Edit rule per
-protected file. `check` reports what it measured: the build's repository root; the directory and
+command `/usr/local/libexec/d1-agent/d1-agent-hook`), one `permissions.deny` Edit rule per
+protected file and one per protected tree (`Edit(/<root>/containment/go/**)` and the other three).
+`check` reports what it measured: the build's repository root; the directory and
 each binary root-owned, closed to other writes, with their modes; the hook and deny rules in your
-settings; each `sandbox.excludedCommands` entry one the hook knows; each protected file present.
+settings; each `sandbox.excludedCommands` entry one the hook knows; each protected file present and
+each protected tree a directory.
 It is a report, not the boundary. Rebuild and reinstall after any change under `containment/go`.
 Keep the macOS firewall on: for a server bound to 0.0.0.0 under `d1-localonly` it is the only
 control, because Seatbelt's `localhost` includes this Mac's own addresses, so the profile admits

@@ -59,10 +59,21 @@ var excludedPaths = []string{
 	"/Users/ryanheffernan/.nvm/versions/node/v22.19.0/bin/copilot",
 }
 
-// copilotBlanket are the copilot flags that grant every tool, path or URL. Copilot has no sandbox
-// of its own (codex runs -s read-only), so its --allow-tool list is its only boundary, and a
-// command that widens it to everything is refused.
-var copilotBlanket = []string{"--allow-all", "--allow-all-tools", "--allow-all-paths", "--allow-all-urls", "--yolo"}
+// copilotInstalled is the path excludedPaths pins for copilot. It does not exist on this Mac any
+// more (nvm moved to v22.23.4), so "copilot" only ever resolved on PATH, and copilot has no sandbox
+// of its own: "copilot -p ... --allow-tool shell" ran arbitrary code outside every sandbox, which
+// --allow-all and --yolo were refused for (audit 2026-10-31, N3). It is refused outright until the
+// owner pins a path that is real; the name stays in excludedNames so the hook still sees it while
+// sandbox.excludedCommands lists it.
+const copilotInstalled = "/Users/ryanheffernan/.nvm/versions/node/v22.19.0/bin/copilot"
+
+// codexDangerous are the codex options that turn off the sandbox or the hook trust codex applies to
+// its own tools; codexConfigKeys are the only "-c key=value" keys admitted, because
+// "-c sandbox_mode=danger-full-access" is the same thing spelled as configuration (audit N3).
+// codexSandboxes are the values "-s" may take: never danger-full-access.
+var codexDangerous = []string{"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--yolo"}
+var codexConfigKeys = []string{"model_reasoning_effort", "model_reasoning_summary", "model_verbosity", "model_supports_reasoning_summaries", "hide_agent_reasoning", "include_plan_tool"}
+var codexSandboxes = []string{"read-only", "workspace-write"}
 
 // isExcludedName reports whether word names an excluded program, by name or by any path.
 func isExcludedName(word string) bool {
@@ -70,13 +81,18 @@ func isExcludedName(word string) bool {
 }
 
 // ExcludedForm returns "" when command is one excluded program run alone: its name or accepted
-// path first (codex only as "codex exec", copilot only as "copilot -p" with none of
-// copilotBlanket, log only as "log show" or "log stream", xcrun only as xcrunForm admits), then arguments that may use quotes,
-// $NAME, redirections and lines joined with a trailing backslash, and at most one heredoc with a
-// quoted delimiter, whose body is data. Anything that could start a second command is refused, so
-// nothing rides along outside the sandbox. Redirections stay allowed: the owner's codex pattern
-// writes its log with one.
-func ExcludedForm(command string) string {
+// path first (codex only as "codex exec" under codexForm, log only as "log show" or "log stream",
+// security only as find-identity, xcrun only as xcrunForm admits, copilot not at all), then
+// arguments that may use quotes, $NAME, redirections and lines joined with a trailing backslash,
+// and at most one heredoc with a quoted delimiter, whose body is data. Anything that could start a
+// second command is refused, so nothing rides along outside the sandbox. Redirections stay allowed:
+// the owner's codex pattern writes its log with one.
+//
+// The command line itself then goes through the tripwire (audit 2026-10-31, N2): these programs run
+// outside every sandbox whatever the sandbox flag says, so before this
+// "xcodebuild -version > CLAUDE.md" and "codex exec -o ~/.claude/settings.json" were admitted. The
+// heredoc body is left out of that check, because a codex prompt names protected files as data.
+func ExcludedForm(command string, cwd string, config Config) string {
 	line, rest := logicalLine(command)
 	delimiter, why := scanShell(line)
 	if why != "" {
@@ -91,22 +107,104 @@ func ExcludedForm(command string) string {
 	if len(words) > 1 {
 		subcommand = words[1]
 	}
-	if name == "codex" && subcommand != "exec" || name == "copilot" && subcommand != "-p" ||
-		name == "log" && subcommand != "show" && subcommand != "stream" || name == "security" && subcommand != "find-identity" {
-		return "only codex exec, copilot -p, log show, log stream and security find-identity are excluded from the sandbox, not " + name + " " + subcommand
-	}
 	if name == "copilot" {
-		for _, word := range words {
-			if slices.Contains(copilotBlanket, strings.SplitN(word, "=", 2)[0]) {
-				return "copilot runs only with an explicit --allow-tool list, never " + word
-			}
-		}
+		return "copilot is not excluded from the sandbox: the path the hook pins for it (" + copilotInstalled +
+			") does not exist any more, it has no sandbox of its own, and \"--allow-tool shell\" grants outside every " +
+			"sandbox what --allow-all was refused for. Use the Codex plugin (node .../codex-companion.mjs task) or ask " +
+			"the owner to pin copilot's current path; remove it from sandbox.excludedCommands until then"
+	}
+	if name == "codex" && subcommand != "exec" ||
+		name == "log" && subcommand != "show" && subcommand != "stream" || name == "security" && subcommand != "find-identity" {
+		return "only codex exec, log show, log stream and security find-identity are excluded from the sandbox, not " + name + " " + subcommand
 	}
 	if why := heredocEnds(rest, delimiter); why != "" {
 		return why
 	}
+	if name == "codex" {
+		if why := codexForm(words[1:], cwd, config); why != "" {
+			return why
+		}
+	}
 	if name == "xcrun" {
-		return xcrunForm(words[1:])
+		if why := xcrunForm(words[1:]); why != "" {
+			return why
+		}
+	}
+	if why := Tripwire(line, config); why != "" {
+		return why
+	}
+	return ""
+}
+
+// codexForm returns "" when codex exec's arguments leave its own sandbox and hook trust in place
+// and write their output inside this repository: no option in codexDangerous, "-s"/"--sandbox" only
+// read-only or workspace-write, "-c"/"--config" only the keys in codexConfigKeys (never
+// sandbox_mode), and "-o"/"--output" only a path in the repository that is not protected. Without
+// these, codex runs arbitrary code outside every sandbox with the owner's credentials, which is what
+// the sandbox exclusion was for one program's own sandbox, not for turning that one off (audit N3).
+func codexForm(arguments []string, cwd string, config Config) string {
+	for index, argument := range arguments {
+		option, value, inline := strings.Cut(argument, "=")
+		next := func() (string, bool) {
+			if inline {
+				return value, true
+			}
+			if index+1 < len(arguments) {
+				return arguments[index+1], true
+			}
+			return "", false
+		}
+		switch {
+		case slices.Contains(codexDangerous, option) || strings.HasPrefix(option, "--dangerously"):
+			return "codex " + argument + " turns off the sandbox codex applies to its own tools, or the trust it asks for " +
+				"its hooks; it is refused here. Run codex exec -s read-only (or -s workspace-write when the task is to edit)"
+		case option == "-c" || option == "--config":
+			setting, _ := next()
+			key, _, _ := strings.Cut(setting, "=")
+			if !slices.Contains(codexConfigKeys, key) {
+				return "codex -c " + setting + " is not admitted: configuration can turn the sandbox off (sandbox_mode) " +
+					"as surely as a flag. The keys admitted here: " + strings.Join(codexConfigKeys, ", ")
+			}
+		case option == "-s" || option == "--sandbox":
+			mode, found := next()
+			if !found || !slices.Contains(codexSandboxes, mode) {
+				return "codex -s " + mode + " is not admitted; codex runs here as -s " + strings.Join(codexSandboxes, " or -s ")
+			}
+		case option == "-o" || option == "--output" || option == "--output-last-message":
+			path, found := next()
+			if !found {
+				return "codex " + option + " needs a path"
+			}
+			if why := outputInRepository(path, cwd, config); why != "" {
+				return "codex " + option + " " + path + ": " + why
+			}
+		}
+	}
+	return ""
+}
+
+// outputInRepository returns "" when path is a file codex may write: inside the repository (codex
+// runs outside every sandbox, so nothing else holds it to one) and not a protected file.
+func outputInRepository(path string, cwd string, config Config) string {
+	if !filepath.IsAbs(path) {
+		if !filepath.IsAbs(cwd) {
+			return "it is relative and the session has no working directory"
+		}
+		path = filepath.Join(cwd, path)
+	}
+	if why := ProtectedTarget(path, cwd, config); why != "" {
+		return why
+	}
+	canonical, err := canonicalPath(filepath.Clean(path))
+	if err != nil {
+		return err.Error()
+	}
+	root, err := canonicalPath(config.Root)
+	if err != nil {
+		return "the repository root cannot be resolved"
+	}
+	if !underPath(canonical, root) {
+		return "a program the sandbox does not hold writes its output inside " + config.Root + ", nowhere else"
 	}
 	return ""
 }

@@ -131,6 +131,36 @@ func TestLocalProtectedFiles(t *testing.T) {
 	}
 }
 
+// TestLocalProtectedTrees (drift): the subpaths local.sb denies are gate.ProtectedTrees, nothing
+// more, nothing less, and every directory above one is denied as an exact path as well, so the
+// rename around a file rule (the comment above them) is closed for a tree too. Pure parsing.
+func TestLocalProtectedTrees(t *testing.T) {
+	var denied []string
+	for _, match := range regexp.MustCompile(`\(repo-tree "([^"]*)"\)`).FindAllStringSubmatch(sbplRulesOnly(LocalProfile), -1) {
+		denied = append(denied, strings.TrimPrefix(match[1], "/"))
+	}
+	wanted := slices.Clone(gate.ProtectedTrees)
+	slices.Sort(denied)
+	slices.Sort(wanted)
+	if !slices.Equal(denied, wanted) {
+		t.Fatalf("local.sb's subpath denies differ from gate.ProtectedTrees:\nlocal.sb: %q\nwanted:   %q", denied, wanted)
+	}
+	if len(wanted) == 0 {
+		t.Fatal("the drift check found no trees to mean anything")
+	}
+	exact := map[string]bool{}
+	for _, match := range regexp.MustCompile(`\(repo-path "([^"]*)"\)`).FindAllStringSubmatch(sbplRulesOnly(LocalProfile), -1) {
+		exact[strings.TrimPrefix(match[1], "/")] = true
+	}
+	for _, tree := range gate.ProtectedTrees {
+		for path := filepath.Dir(tree); path != "."; path = filepath.Dir(path) {
+			if !exact[path] {
+				t.Errorf("local.sb denies the tree %s but not its parent %s as an exact path, so %s could be renamed", tree, path, path)
+			}
+		}
+	}
+}
+
 // sbplRulesOnly drops comments and the define line, leaving the rules that use repo-path.
 func sbplRulesOnly(profile string) string {
 	var rules []string

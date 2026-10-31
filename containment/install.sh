@@ -11,11 +11,25 @@ install_dir=/usr/local/libexec/d1-agent
 settings="$HOME/.claude/settings.json"
 
 cd "$root/containment/go"
+# Nothing is built or cached in a directory a contained process can write: both game.sb and local.sb
+# allow writes under /private/var/folders (where mktemp -d puts its directory) and under the
+# repository, so a process running during the install could have replaced a built binary between
+# "go build" and "sudo install", or poisoned the build cache so a failing control passed
+# (audit 2026-10-31, N4 and N5). The three directories below are in $HOME, which no agent sandbox
+# and no launcher profile allows writing.
+work=$(mktemp -d "$HOME/.d1-agent-install.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+build="$work/build"
+control="$work/control"
+mkdir "$build" "$control"
+
+export GOCACHE="$work/gocache"
+export GOFLAGS=-mod=mod
+
 echo "== controls (every one must pass, none skipped)"
-GOCACHE="$PWD/.gocache" GOFLAGS=-mod=mod go test -count=1 ./...
+go test -count=1 ./...
 
 echo "== build"
-build=$(mktemp -d)
 go build -o "$build/d1-nonet" ./cmd/d1-nonet
 go build -ldflags "-X main.repositoryRoot=$root" -o "$build/d1-localonly" ./cmd/d1-localonly
 go build -ldflags "-X main.repositoryRoot=$root" -o "$build/d1-agent-hook" ./cmd/d1-agent-hook
@@ -56,13 +70,11 @@ elif [ -z "${D1_ORKEY_REF:-}" ]; then
   echo "d1-orkey: no D1_ORKEY_REF, so no env file; the key comes from the login Keychain (service d1-orkey, account openrouter)"
 fi
 sudo install -o root -g wheel -m 0644 "$build/libd1testgate.a" "$install_dir/"
-rm -rf "$build"
 # The Keychain item trusts one d1-orkey build by its code hash; this install made a new one, which
 # refuses at start (it shows no dialog) until the key is stored again from it.
 echo "d1-orkey: new build; store the key again: $install_dir/d1-orkey store-key, then launchctl kickstart -k gui/$(id -u)/com.d1preservation.orkey"
 
 echo "== test gate control (a test-named binary is contained before main; the same binary named as a tool is not)"
-control=$(mktemp -d)
 mkdir "$control/deps"
 cat > "$control/probe.c" <<'EOF'
 #include <errno.h>
@@ -82,7 +94,6 @@ cc -O2 "$control/probe.c" -Wl,-force_load,"$install_dir/libd1testgate.a" -o "$co
 cp "$control/deps/probe-0123456789abcdef" "$control/probe"
 test "$("$control/deps/probe-0123456789abcdef")" = contained || { echo "FAIL test gate: a test binary was not contained"; exit 2; }
 test "$("$control/probe")" = open || { echo "FAIL test gate: the control binary was contained too, so the probe proves nothing"; exit 2; }
-rm -rf "$control"
 echo "OK   test gate: a test binary is contained before main; the same code named as a tool is not"
 
 echo "== settings (backup, then merge)"

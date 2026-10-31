@@ -51,14 +51,16 @@ func marshal(t *testing.T, value any) []byte {
 	return text
 }
 
-// bashEvent is a Bash event with no session record (so never elevated).
+// bashEvent is a Bash event from a session on a model that is not elevated. The model is there so
+// the event is not read as an unsandboxed harness (unsandboxedHarness), which is what an event
+// carrying neither a transcript nor a model means.
 func bashEvent(t *testing.T, command string, sandboxOff bool, cwd string) []byte {
 	t.Helper()
 	input := map[string]any{"command": command}
 	if sandboxOff {
 		input["dangerouslyDisableSandbox"] = true
 	}
-	return marshal(t, map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": input, "cwd": cwd})
+	return marshal(t, map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": input, "cwd": cwd, "model": "deepseek/deepseek-v4.1-flash-1017"})
 }
 
 // editEvent is an edit-tool event for one path.
@@ -157,6 +159,13 @@ func TestHookElevatedModel(t *testing.T) {
 		{"codex sol", "", "", "gpt-6.1-sol", "", true},
 		{"codex astra", "", "", "gpt-6-astra", "", true},
 		{"codex luna", "", "", "gpt-6.1-luna", "", false},
+		// The base-URL rule holds whatever else the event carries (audit 2026-10-31, N8): a session
+		// that names its own model may not name itself out of the proxy check.
+		{"opus session that also names its model, through a proxy", opus, "", "claude-opus-5-5", "http://127.0.0.1:8317", false},
+		{"opus session that also names its model, to Anthropic", opus, "", "claude-opus-5-5", "", true},
+		{"a claude model with no transcript, through a proxy", "", "", "claude-opus-5-5", "http://127.0.0.1:8317", false},
+		{"a claude model with no transcript, to Anthropic", "", "", "claude-opus-5-5", "", true},
+		{"codex through a proxy base URL, which codex does not read", "", "", "gpt-6.1-sol", "http://127.0.0.1:8317", true},
 	}
 	for _, test := range cases {
 		session := config

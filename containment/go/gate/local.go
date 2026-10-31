@@ -54,6 +54,33 @@ var ProtectedFiles = []string{
 	"containment/go/cmd/d1-orkey/main.go",
 	"containment/go/orkey/orkey.go",
 	"containment/go/orkey/controls.go",
+	".codex/hooks.json",
+	"containment/settings-allow.sh",
+	"containment/netguard-requirements.md",
+}
+
+// ProtectedTrees are the repository directories whose every file is protected, present or not: no
+// agent edits one, nothing under d1-localonly writes one, and the hook refuses a Bash command that
+// names one in anything but a pure read. Directories, against the owner's 2026-10-16 "named files
+// only" rule, because what is dangerous here is a file nobody has listed yet (audit 2026-10-31, N1
+// and N4):
+//
+//   - containment/go and containment/c: install.sh runs "go test ./..." and "go build" over the
+//     whole checkout in the owner's terminal, so a planted hook/planted_test.go, a new rule file or
+//     an edited go.mod runs as the owner. Listing today's files leaves tomorrow's unprotected.
+//   - .claude/hooks: .claude/settings.local.json runs .claude/hooks/owner-inbox.sh on every
+//     PostToolUse and on Stop, outside every sandbox.
+//   - .git/hooks: git runs pre-commit, post-checkout and the rest in the owner's terminal at their
+//     next git command. Only pre-push was listed.
+//
+// local.sb denies writes to each as one subpath, and to every directory above one as an exact path
+// (TestLocalProtectedFiles keeps the lists equal). A tree never covers a directory that holds
+// anything an agent legitimately writes: reviews/, proposals/ and runs/ are outside them.
+var ProtectedTrees = []string{
+	".claude/hooks",
+	".git/hooks",
+	"containment/c",
+	"containment/go",
 }
 
 // GameBinaries run game code (or, d1-srv, start it) and run only under d1-nonet. The Rust three

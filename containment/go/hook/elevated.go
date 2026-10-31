@@ -52,11 +52,18 @@ func SessionModel(call event, config Config) string {
 
 // Elevated reports whether the session making this call may run the elevated tools, and if not,
 // why, for the refusal. Anything it cannot read is not elevated.
+//
+// The base-URL rule applies to every Claude Code session (transcript_path) and to every call that
+// names a Claude model, not only to a call that carries no model field (audit 2026-10-31, N8):
+// before this, an event carrying model: claude-opus-5-5 with ANTHROPIC_BASE_URL at a local proxy
+// was elevated, so the day Claude Code adds model to its events every proxy session would name
+// itself. Codex sends the model and does not read ANTHROPIC_BASE_URL, so its calls are unaffected.
 func Elevated(call event, config Config) (bool, string) {
-	if call.Model == "" && config.AnthropicBaseURL != "" && strings.TrimSuffix(config.AnthropicBaseURL, "/") != anthropicAPI {
+	model := SessionModel(call, config)
+	elsewhere := config.AnthropicBaseURL != "" && strings.TrimSuffix(config.AnthropicBaseURL, "/") != anthropicAPI
+	if elsewhere && (call.TranscriptPath != "" || call.Model == "" || strings.HasPrefix(model, "claude")) {
 		return false, "this session talks to " + config.AnthropicBaseURL + ", not Anthropic, so it has the current limits"
 	}
-	model := SessionModel(call, config)
 	if model == "" {
 		return false, "the hook cannot tell which model makes this call, so it has the current limits"
 	}

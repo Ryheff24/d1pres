@@ -35,16 +35,25 @@ type Config struct {
 }
 
 // event is the part of the PreToolUse event the rules read. Codex sends the model; Claude Code
-// sends the transcript and, for a subagent's call, its agent id (SessionModel).
+// sends the transcript and, for a subagent's call, its agent id (SessionModel). Cursor's native
+// beforeShellExecution event sends neither, and its command at the top level, not in tool_input.
 type event struct {
 	HookEventName  string          `json:"hook_event_name"`
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
+	Command        *string         `json:"command"`
 	Cwd            string          `json:"cwd"`
 	TranscriptPath string          `json:"transcript_path"`
 	AgentID        string          `json:"agent_id"`
 	Model          string          `json:"model"`
 }
+
+// shellEvents are the event names this hook decides: Claude Code's and Codex's PreToolUse, Cursor's
+// two spellings of it through its Claude-hook import, and Cursor's native shell event. shellTools
+// are the tool names that run a shell: Claude Code and Codex send Bash, the cursor-agent CLI sends
+// Shell.
+var shellEvents = []string{"PreToolUse", "preToolUse", "beforeShellExecution"}
+var shellTools = []string{"Bash", "Shell", "shell"}
 
 // toolInput is the part of a tool's input the rules read; a field of the wrong type refuses.
 type toolInput struct {
@@ -56,48 +65,53 @@ type toolInput struct {
 
 // Decide reads one event and applies the rule for its tool. projectDirectory is
 // CLAUDE_PROJECT_DIR from the hook's environment.
+// The owner's flag on this function (2026-10-27, answered by the 2026-10-31 audit, §1 and N7):
+// the event-name line is right, and the gaps were below it. What was measured and what changed:
+//
+//   - Cursor. Its native event is beforeShellExecution with the command at the top level and no
+//     tool_input, which this hook used to refuse as unreadable, so under that shape every Cursor
+//     shell call was blocked. Both spellings of PreToolUse, beforeShellExecution and a top-level
+//     command are read now, and Shell counts as Bash. No Cursor hook is registered on this Mac
+//     (~/.cursor/hooks.json does not exist), so the path stays unverified by anything but the tests.
+//   - Fail closed on the sandbox flag. Only Claude Code sends dangerouslyDisableSandbox. A harness
+//     that sends neither transcript_path (Claude Code) nor model (Codex) is an unsandboxed shell,
+//     and the sandbox-off rules apply to it as if the flag were true. Codex is covered by its own
+//     -s sandbox, which is why its events are not treated that way.
+//   - "Deny and specify correct use." Every refusal below names the allowed form, not only the doc:
+//     the tripwire prints the reading programs and the staging route (howToRead), a game binary
+//     prints the launcher command with the path filled in, a test prints the build-then-launch pair.
+//   - "Tests included, automatically." A test that runs inside the agent sandbox is refused here
+//     (runsTestsInSandbox), not only when the sandbox is off, so the rule is enforced in code and
+//     not by remembering it. The lock is still the gate compiled into each test binary.
+//
+// What this function cannot answer is in the audit: the test-package control (N7), the server
+// self-gate (F1 of 2026-10-27) and the documentation drift the owner describes are not hook rules.
 func Decide(raw []byte, projectDirectory string, config Config) string {
 	var call event
 	var input toolInput
 	err := json.Unmarshal(raw, &call)
-	if err == nil {
+	if err == nil && len(call.ToolInput) > 0 {
 		err = json.Unmarshal(call.ToolInput, &input)
 	}
 	if err != nil {
 		return "the event is not one this hook can read (" + err.Error() + ")"
 	}
-	if call.HookEventName != "" && call.HookEventName != "PreToolUse" && call.HookEventName != "preToolUse" {
-		// *CRITICAL FLAG FOR MYTHOS*
-		// I added `&& call.HookEventName != "preToolUse"` for cursor here. otherwise it would always error for the agent at least on bash
-		// just double check that this logic, cursor may have more flows same for codex and claude, im assuming this coverage is not good enough
-		// over the last week from agent use, i've really learned common patterns here of how the agents are behaving and some love to miss-behave
-		// first, the containment needs to have better automatic containment it shouldn't be a critical blocker, first off, deny and specify correct
-		// use. thats 90% of the issue, its like "this is not allowed", then the agents have no idea whats not allowed, they just blank hard.
-		// i point them at what i think would be relevant documentation explaining the procedure(agent-containments usually, then 2nd is the
-		// research skill). its not drilled in enough what to not do and what to do. theres a lot of conflicting information and old procedures
-		// that while they are quoted out, cause drift. claude.md for example, or the fact that gpt was read only at first, then i added sandbox access
-		// but the agents.md and claude.md should me symlinks, strip the prior source content from these docs entirely and focus on how shit works
-		// the main issue are agents that aren't smart, they just cannot understand whats occuring,
-		// this needs a larger look though, its extremely easy for claude opus 5.5 to understand and work here because its the most intelligent.
-		// but for literally anyone else, likely half because documentation is written specifically for claude from claude,.
-		// another example, the last mythos reviewer, who was testing the sandbox to make sure it worked, executed 2 tool calls (iirc it was bash)
-		// with failed do to the hook(the test) then could be seen executing a 3rd tool call to i believe update a file that was considered a
-		// locked file, and should've failed the hook. A second example, the original specification was everything ran in containment that ran code in
-		// any way, tests included. but i don't think thats being followed, and its systemic because its not being prevented at the code level,
-		// i keep sharing this pdf with agents from a talk at gdc from i think the lead engineer on the engine for destiny 1, this talk was in 2015
-		// but specifically where it talks about rules of the codebase, enforcement, etc. it all applies here in a different way. Any tool, place, method, etc,
-		// where code is tested or ran in any way, must be in containment, AUTOMATICALLY.
-		return "this hook decides PreToolUse events, and was sent " + call.HookEventName
+	if input.Command == nil {
+		input.Command = call.Command
+	}
+	if call.HookEventName != "" && !slices.Contains(shellEvents, call.HookEventName) {
+		return "this hook decides " + strings.Join(shellEvents, ", ") + " events, and was sent " + call.HookEventName
+	}
+	if slices.Contains(shellTools, call.ToolName) || call.ToolName == "" && call.HookEventName == "beforeShellExecution" {
+		return decideBash(call, input, []string{projectDirectory, call.Cwd}, config)
 	}
 	switch call.ToolName {
-	case "Bash":
-		return decideBash(call, input, []string{projectDirectory, call.Cwd}, config)
 	case "Edit", "Write", "MultiEdit", "NotebookEdit":
 		return decideEdit(call.ToolName, input, call.Cwd, config)
 	case "apply_patch":
 		return decidePatch(input, call.Cwd, config)
 	}
-	return fmt.Sprintf("this hook decides Bash, the edit tools and apply_patch only, and was sent %q", call.ToolName)
+	return fmt.Sprintf("this hook decides %s, the edit tools and apply_patch only, and was sent %q", strings.Join(shellTools, ", "), call.ToolName)
 }
 
 // decideBash: a game binary named without the launcher is refused from any session. In sessions
@@ -116,40 +130,78 @@ func decideBash(call event, input toolInput, directories []string, config Config
 	code := withoutHeredocBody(command)
 	game := firstWordMatching(code, func(word string) bool { return slices.Contains(gate.GameBinaries, filepath.Base(word)) })
 	if game != "" {
-		return game + " runs game code; start it only as the argument of " + config.LauncherDirectory + "/d1-nonet"
+		return game + " runs game code; start it only as the argument of " + config.LauncherDirectory + "/d1-nonet, as one plain command: " +
+			config.LauncherDirectory + "/d1-nonet " + filepath.Join(config.Root, "d1-server/target/release", filepath.Base(game)) +
+			" ARGS --log FILE (absolute paths, optional D1_*=value in front, never D1_NET*, no quotes, pipes, \";\", \"$\" or redirection)"
 	}
-	if !inScope(directories, config.Root) {
+	if !inScope(directories, config.Root) && !strings.Contains(code, config.Root) {
+		// A session working elsewhere meets the rules of this repository only when it reaches into
+		// it: that is the whole of F2 and N9 (a sandbox-off "cp x <repo>/CLAUDE.md" from another
+		// project passed), without imposing the launcher form on the owner's other projects, where
+		// this hook is installed too.
 		return ""
 	}
+	if why, decided := decideInRepository(call, command, code, config); decided {
+		return why
+	}
+	if input.DangerouslyDisableSandbox != nil && *input.DangerouslyDisableSandbox || unsandboxedHarness(call) {
+		return decideSandboxOff(call, command, config)
+	}
+	return ""
+}
+
+// unsandboxedHarness reports whether the event comes from a harness that sends no sandbox flag and
+// applies no sandbox of its own: neither Claude Code's transcript_path nor Codex's model. Codex
+// sends the model and applies its own -s sandbox to its tools; Cursor's shell has nothing, so its
+// calls are decided as if the sandbox were off (fail closed, 2026-10-27 review §2).
+func unsandboxedHarness(call event) bool {
+	return call.TranscriptPath == "" && call.Model == ""
+}
+
+// decideInRepository applies the rules that hold for a session in, inside or above the repository,
+// or whose command spells its root: the Codex plugin, the read-only profilers, the owner's
+// sandbox-excluded programs, the spellings that would drop the Rust test gate, a test run inside
+// the agent sandbox, and the tripwire. decided is false when none of them applies and the
+// sandbox-off rules are next.
+func decideInRepository(call event, command string, code string, config Config) (string, bool) {
 	if isCompanion(code) {
-		return CompanionForm(command)
+		return CompanionForm(command), true
 	}
 	if RoutesToProfiler(code) {
 		if why := ProfilerForm(command, config.Root); why != "" {
-			return why
+			return why, true
 		}
-		return Tripwire(command)
+		return Tripwire(command, config), true
 	}
 	if excluded := firstWordMatching(code, isExcludedName); excluded != "" {
 		if elevated, because := Elevated(call, config); !elevated {
-			return "the owner's settings run " + filepath.Base(excluded) + " outside the sandbox, which only elevated models may do, and " + because + " (containment/agent-containment.md, Access control matrix)"
+			return "the owner's settings run " + filepath.Base(excluded) + " outside the sandbox, which only elevated models may do, and " + because + " (containment/agent-containment.md, Access control matrix)", true
 		}
-		return ExcludedForm(command)
+		return ExcludedForm(command, call.Cwd, config), true
 	}
-	override := overridesTestGate(code)
-	if override != "" {
-		return override + " would build or run a Rust test without the test gate that d1-server/.cargo/config.toml links in; every test runs inside the network sandbox (containment/agent-containment.md, Tests)"
+	if override := overridesTestGate(code); override != "" {
+		return override + " would build or run a Rust test without the test gate that d1-server/.cargo/config.toml links in; every test runs inside the network sandbox (containment/agent-containment.md, Tests)", true
 	}
-	tripped := Tripwire(command)
-	if tripped != "" {
-		return tripped
+	if why := runsTestsInSandbox(code, config); why != "" {
+		return why, true
 	}
-	if input.DangerouslyDisableSandbox == nil || !*input.DangerouslyDisableSandbox {
-		return ""
+	if tripped := Tripwire(command, config); tripped != "" {
+		return tripped, true
 	}
+	return "", false
+}
+
+// decideSandboxOff applies the sandbox-off rules: the launcher form, or an elevated tool from an
+// elevated model's session.
+func decideSandboxOff(call event, command string, config Config) string {
 	launcher, why := LauncherForm(command, config)
 	if why == "" {
 		return RootOwned(launcher)
+	}
+	if unsandboxedHarness(call) {
+		why += ". This harness sends no sandbox flag and applies no sandbox of its own (the event carries neither " +
+			"transcript_path nor model), so every command from it is decided as if the sandbox were off, which is what " +
+			"it is: ordinary shell work belongs in Claude Code or Codex, where it runs inside one"
 	}
 	words := strings.Fields(command)
 	if len(words) == 0 || !isElevatedToolWord(words[0]) {
@@ -162,19 +214,60 @@ func decideBash(call event, input toolInput, directories []string, config Config
 	return ElevatedForm(command, call.Cwd, config)
 }
 
+// runsTestsInSandbox returns "" unless command would run tests in the agent's own sandbox, where
+// loopback is open and egress goes through the proxy: "go test" or "cargo test" (bench, nextest and
+// cargo's t alias included) without the option that only builds them. Every test runs inside the
+// game profile (owner, 2026-10-19), and until now only a sandbox-off test run was refused, which
+// left the common case -- a plain "go test ./..." inside the sandbox -- passing (audit N7). The
+// lock is the gate compiled into each test binary; this is the rule enforced where it is broken.
+func runsTestsInSandbox(command string, config Config) string {
+	builds := map[string]string{"go": "-c", "cargo": "--no-run"}
+	for _, segment := range commandSegments(command) {
+		words := strings.Fields(segment)
+		for len(words) > 0 && isAssignment(words[0]) {
+			words = words[1:]
+		}
+		if len(words) == 0 {
+			continue
+		}
+		program := filepath.Base(words[0])
+		only, known := builds[program]
+		if !known || !slices.ContainsFunc(words[1:], isTestSubcommand) || slices.Contains(words[1:], only) {
+			continue
+		}
+		return program + " " + strings.Join(words[1:], " ") + " would run tests inside the agent sandbox, where loopback is open; " +
+			"every test runs inside the game profile (containment/agent-containment.md, Tests). Build them here, then run each " +
+			"binary with the sandbox off: \"cargo test --no-run -p CRATE\" prints each Executable, then " +
+			config.LauncherDirectory + "/d1-nonet " + filepath.Join(config.Root, "d1-server/target/debug/deps") + "/CRATE-HASH [filter]; " +
+			"for Go, \"go test -c -o " + filepath.Join(config.Root, "testbin") + "/ ./internal/...\", then " +
+			config.LauncherDirectory + "/d1-nonet " + filepath.Join(config.Root, "testbin") + "/NAME.test [-test.run X]"
+	}
+	return ""
+}
+
+// isTestSubcommand reports whether word is a go or cargo subcommand that runs tests.
+func isTestSubcommand(word string) bool {
+	return word == "test" || word == "t" || word == "bench" || word == "nextest"
+}
+
 // isElevatedToolWord reports whether word names one of elevatedGrants, by name or path.
 func isElevatedToolWord(word string) bool {
 	_, known := elevatedGrants[filepath.Base(word)]
 	return known
 }
 
-// firstWordMatching returns the first word of any command segment (split at ; & | ( ) { } `,
-// $( and newlines, assignments skipped) that matches, or "". A tripwire: it is spelling-based.
-func firstWordMatching(command string, matches func(string) bool) string {
-	segments := strings.FieldsFunc(strings.ReplaceAll(command, "$(", ";"), func(character rune) bool {
+// commandSegments splits a command at ; & | ( ) { } `, $( and newlines: what bash could run as
+// separate commands, as a tripwire reads it (spelling-based, quotes not tracked).
+func commandSegments(command string) []string {
+	return strings.FieldsFunc(strings.ReplaceAll(command, "$(", ";"), func(character rune) bool {
 		return strings.ContainsRune(";&|(){}`\n", character)
 	})
-	for _, segment := range segments {
+}
+
+// firstWordMatching returns the first word of any command segment (commandSegments, assignments
+// skipped) that matches, or "". A tripwire: it is spelling-based.
+func firstWordMatching(command string, matches func(string) bool) string {
+	for _, segment := range commandSegments(command) {
 		for _, word := range strings.Fields(segment) {
 			if isAssignment(word) {
 				continue

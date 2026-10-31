@@ -28,11 +28,16 @@ func Settings(config Config) map[string]any {
 	}
 }
 
-// denyRules is one Edit rule per protected path.
+// denyRules is one Edit rule per protected path, and one per protected tree, which Claude Code
+// reads as a gitignore-style pattern (so it also denies Bash writes under the tree in the agent's
+// own sandbox).
 func denyRules(config Config) []string {
 	var rules []string
 	for _, path := range ProtectedPaths(config) {
 		rules = append(rules, "Edit(/"+path+")")
+	}
+	for _, path := range ProtectedTreePaths(config) {
+		rules = append(rules, "Edit(/"+path+"/**)")
 	}
 	return rules
 }
@@ -64,7 +69,25 @@ func Check(config Config) []Line {
 		optional := slices.Contains(optionalFiles, name)
 		lines = append(lines, fact(err == nil || optional, "protected: "+name+presence(err, optional)))
 	}
+	for _, name := range gate.ProtectedTrees {
+		info, err := os.Stat(filepath.Join(config.Root, name))
+		directory := err == nil && info.IsDir()
+		lines = append(lines, fact(directory || err != nil, "protected tree: "+name+"/ (every file under it)"+treePresence(err, directory)))
+	}
 	return lines
+}
+
+// treePresence says whether a protected tree is a directory; one that does not exist yet is
+// protected against being created, like an optional file.
+func treePresence(err error, directory bool) string {
+	switch {
+	case directory:
+		return " is present"
+	case err != nil:
+		return " is absent; creating a file in it is refused"
+	default:
+		return " is not a directory"
+	}
 }
 
 // fact makes a Line.
@@ -142,6 +165,12 @@ func checkSettings(config Config) []Line {
 		}
 	}
 	for _, entry := range settings.Sandbox.ExcludedCommands {
+		// The Codex plugin's two entries are node on its companion script, which CompanionForm holds
+		// to one command; without this the check printed a FAIL nobody could clear (2026-10-27
+		// review §1: a check that always fails is a check nobody reads).
+		if isCompanion(strings.ReplaceAll(entry, "*", "")) {
+			continue
+		}
 		if !isExcludedName(strings.TrimSuffix(strings.Fields(entry + " x")[0], "*")) {
 			unknown = append(unknown, entry)
 		}

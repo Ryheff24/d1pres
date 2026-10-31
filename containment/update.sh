@@ -61,6 +61,10 @@ if [ "$mode" = check ]; then
 fi
 
 g checkout -f HEAD -- containment CLAUDE.md
+# install.sh used to cache the build under containment/go/.gocache, which every contained process
+# could write; it builds in $HOME now, so whatever is left there is stale and nothing should read it
+# again (audit 2026-10-31, N4).
+rm -rf "$root/containment/go/.gocache"
 if ! g diff --quiet -- containment CLAUDE.md; then
   echo "STOP: after the checkout these still differ from main:"; g diff --stat -- containment CLAUDE.md; exit 2
 fi
