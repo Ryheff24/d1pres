@@ -29,15 +29,15 @@ hook or host configuration.
 
 ## Executable regression tests
 
-The follow-up adds [pr9_regression_test.go](/Users/ryanheffernan/Documents/projects/d1remote/containment/go/hook/pr9_regression_test.go),
-with one `TestPR9Regression` group per finding. These tests assert the intended
+The follow-up adds [containment_regression_test.go](/Users/ryanheffernan/Documents/projects/d1remote/containment/go/hook/containment_regression_test.go),
+with one `TestContainmentRegression` group per finding. These tests assert the intended
 security behavior: unsafe forms must be refused and allowed controls must pass.
 They have no expected-failure switch or skip, and are included automatically in
 the existing hook package and coverage workflow. Production hook code is unchanged.
 
 The hook package was compiled with `go test -c` in the agent sandbox, with a fresh
 temporary build cache and `GOPROXY=off`. The compiled binary then ran through the
-installed `/usr/local/libexec/d1-agent/d1-nonet`, selecting `-test.run TestPR9Regression`.
+installed `/usr/local/libexec/d1-agent/d1-nonet`, selecting `-test.run TestContainmentRegression`.
 The launcher ran with the d1preservation working directory so its required root
 probe paths existed. The regression fixtures remained in temporary space.
 
@@ -47,11 +47,11 @@ there was no launcher refusal or fixture-setup failure.
 
 | Test group | Unsafe cases failing | Controls passing |
 |---|---:|---:|
-| `R1_CodexOptions` | 3 | 3 |
-| `R2_OutputExpansion` | 1 | 3 |
-| `R3_WorktreeCase` | 6 | 3 |
-| `R4_RelativeScope` | 3 | 3 |
-| `R5_TestWrapper` | 1 | 3 |
+| `CodexOptions` (R1) | 3 | 3 |
+| `OutputExpansion` (R2) | 1 | 3 |
+| `WorktreeCase` (R3) | 6 | 3 |
+| `RelativeScope` (R4) | 3 | 3 |
+| `TestWrapper` (R5) | 1 | 3 |
 
 R3 checks `Edit`, `Write`, and `apply_patch` for each spelling, confirms file
 identity with `os.SameFile`, and checks that an ordinary file in the same worktree
