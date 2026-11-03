@@ -110,8 +110,11 @@ on it. A test that needs a socket fails, visibly, and gets an in-memory transpor
 - **What it does not cover:** a test binary copied out of `deps/` and run by another name, and a
   workspace tool (not a test) that opens a socket. Both are deliberate evasions of the rule above,
   which the hook and the instructions forbid; neither is a path a test takes by accident. Seven of
-  the 24 Go packages with tests did not import the gate when the 2026-10-31 audit looked, so
-  `TestEveryTestPackageIsGated` is being widened to every directory holding a `_test.go`.
+  the 24 Go packages with tests did not import the gate when the 2026-10-31 audit looked; all 24
+  do since d1preservation `cd178ff` (2026-11-03), and `TestEveryTestPackageIsGated` already walks
+  every directory of `tools/d1` holding a `_test.go` and passes. Not yet covered: an import from a
+  file this platform does not build (a GOOS suffix or a build constraint) still counts as gated.
+  None exists today; the widened control is staged for the owner.
 
 ## Protected files and trees
 

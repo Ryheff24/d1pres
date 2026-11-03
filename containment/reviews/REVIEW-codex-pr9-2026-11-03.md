@@ -90,9 +90,15 @@ ReachesIn) was run as an A/B, built once against this head and once against the 
 fixture writes the game profile denies skipped. All 8 passed on both. The full containment suite
 still needs the owner's `install.sh`.
 
-Still open, and outside this repository's code: the seven test packages without the gate import,
-and the package-coverage control, both in d1preservation (R5's second half). The other deferred
-items in the table below are unchanged.
+R5's second half, in d1preservation, is closed by `cd178ff`: the seven ungated `tools/d1` packages
+(cmd/d1-srv, cmd/roadmap-check, internal/perfscan, r01cmp, renderm, sched, viewdiff) import the
+gate. The control was checked first: a gated binary inside the agent sandbox exits 2. Under
+d1-nonet, `TestEveryTestPackageIsGated` passes, as do six of the seven packages. sched has one
+failure, `TestEmitJobsDefaultMatchesTable`: it has been red since 2026-10-27 and waits on the
+owner's protected `main.rs` change. The control already covered every test directory of the
+module. It still counts an import from a file this platform does not build; a version that does
+not, with a negative control, is staged for the owner. The other deferred items in the table below
+are unchanged.
 
 ## Findings requiring changes
 
