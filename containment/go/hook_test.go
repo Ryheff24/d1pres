@@ -638,12 +638,12 @@ func checkReport(lines []hook.Line) string {
 func TestHookBinary(t *testing.T) {
 	config := fakeHookTree(t)
 	binary := filepath.Join(filepath.Dir(config.Root), "d1-agent-hook")
-	log, err := exec.Command("go", "build", "-ldflags", "-X main.repositoryRoot="+config.Root, "-o", binary, "./cmd/d1-agent-hook").CombinedOutput()
+	log, err := buildCommand("-ldflags", "-X main.repositoryRoot="+config.Root, "-o", binary, "./cmd/d1-agent-hook").CombinedOutput()
 	if err != nil {
 		t.Fatalf("build: %v\n%s", err, log)
 	}
 	unrooted := binary + "-unrooted"
-	log, err = exec.Command("go", "build", "-o", unrooted, "./cmd/d1-agent-hook").CombinedOutput()
+	log, err = buildCommand("-o", unrooted, "./cmd/d1-agent-hook").CombinedOutput()
 	if err != nil {
 		t.Fatalf("build: %v\n%s", err, log)
 	}

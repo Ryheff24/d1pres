@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -23,7 +22,7 @@ const listedPort = "8789"
 func buildLocalOnly(t *testing.T, root string) string {
 	t.Helper()
 	launcher := filepath.Join(root, "bin", "d1-localonly")
-	command := exec.Command("go", "build", "-ldflags", "-X main.repositoryRoot="+root, "-o", launcher, "./cmd/d1-localonly")
+	command := buildCommand("-ldflags", "-X main.repositoryRoot="+root, "-o", launcher, "./cmd/d1-localonly")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build d1-localonly: %v\n%s", err, output)
@@ -192,7 +191,7 @@ func TestLocalOnlyRuns(t *testing.T) {
 		t.Fatalf("a loopback connection on an unlisted port was not refused: status %d", status)
 	}
 	unrooted := filepath.Join(t.TempDir(), "d1-localonly")
-	log, err := exec.Command("go", "build", "-o", unrooted, "./cmd/d1-localonly").CombinedOutput()
+	log, err := buildCommand("-o", unrooted, "./cmd/d1-localonly").CombinedOutput()
 	if err != nil {
 		t.Fatalf("build: %v\n%s", err, log)
 	}
