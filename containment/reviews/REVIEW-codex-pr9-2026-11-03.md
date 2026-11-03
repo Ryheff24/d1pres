@@ -27,6 +27,43 @@ d1preservation checkout. The full local Seatbelt suite, game code, servers, and
 installation were not run. This review does not establish the state of the installed
 hook or host configuration.
 
+## Executable regression tests
+
+The follow-up adds [pr9_regression_test.go](/Users/ryanheffernan/Documents/projects/d1remote/containment/go/hook/pr9_regression_test.go),
+with one `TestPR9Regression` group per finding. These tests assert the intended
+security behavior: unsafe forms must be refused and allowed controls must pass.
+They have no expected-failure switch or skip, and are included automatically in
+the existing hook package and coverage workflow. Production hook code is unchanged.
+
+The hook package was compiled with `go test -c` in the agent sandbox, with a fresh
+temporary build cache and `GOPROXY=off`. The compiled binary then ran through the
+installed `/usr/local/libexec/d1-agent/d1-nonet`, selecting `-test.run TestPR9Regression`.
+The launcher ran with the d1preservation working directory so its required root
+probe paths existed. The regression fixtures remained in temporary space.
+
+Observed on 2026-11-03: exit 1 from the tests, **14 failing leaf cases, 15 passing
+control cases, no skips**. All five finding groups failed for the documented gaps;
+there was no launcher refusal or fixture-setup failure.
+
+| Test group | Unsafe cases failing | Controls passing |
+|---|---:|---:|
+| `R1_CodexOptions` | 3 | 3 |
+| `R2_OutputExpansion` | 1 | 3 |
+| `R3_WorktreeCase` | 6 | 3 |
+| `R4_RelativeScope` | 3 | 3 |
+| `R5_TestWrapper` | 1 | 3 |
+
+R3 checks `Edit`, `Write`, and `apply_patch` for each spelling, confirms file
+identity with `os.SameFile`, and checks that an ordinary file in the same worktree
+remains editable. R1 and R2 use an elevated session so model restrictions cannot
+hide argument-check failures. R4 sets both session directories outside the fixture
+repository. Commands and patches are hook inputs only; none is executed or applied.
+
+These are deliberately failing regression requirements against the reviewed
+implementation. They must turn green when the fixes land, without removing the
+unsafe cases or weakening their expected refusal. No test covers the separately
+deferred host configuration, server gates, or missing imports in d1preservation.
+
 ## Findings requiring changes
 
 ### R1 — P1: shell quoting bypasses the Codex option restrictions (N3)
