@@ -134,20 +134,157 @@ func decideBash(call event, input toolInput, directories []string, config Config
 			config.LauncherDirectory + "/d1-nonet " + filepath.Join(config.Root, "d1-server/target/release", filepath.Base(game)) +
 			" ARGS --log FILE (absolute paths, optional D1_*=value in front, never D1_NET*, no quotes, pipes, \";\", \"$\" or redirection)"
 	}
+	sandboxOff := input.DangerouslyDisableSandbox != nil && *input.DangerouslyDisableSandbox || unsandboxedHarness(call)
+	because := ""
 	if !inScope(directories, config.Root) && !strings.Contains(code, config.Root) {
 		// A session working elsewhere meets the rules of this repository only when it reaches into
 		// it: that is the whole of F2 and N9 (a sandbox-off "cp x <repo>/CLAUDE.md" from another
 		// project passed), without imposing the launcher form on the owner's other projects, where
-		// this hook is installed too.
-		return ""
+		// this hook is installed too. Reaching is decided on the paths the command spells, resolved
+		// (reachesRepository): "cp x ../repo/CLAUDE.md" and "cd ../repo && go test" reach it as
+		// surely as the absolute root does (review of PR 9, R4).
+		reaches, unknown := reachesRepository(code, directories, config)
+		switch {
+		case reaches:
+		case unknown != "" && sandboxOff:
+			because = "; the rules of " + config.Root + " applied because " + unknown + ", so whether this sandbox-off command " +
+				"reaches it cannot be told: spell the directory out"
+		default:
+			return ""
+		}
 	}
-	if why, decided := decideInRepository(call, command, code, config); decided {
-		return why
+	why := ""
+	if refused, decided := decideInRepository(call, command, code, config); decided {
+		why = refused
+	} else if sandboxOff {
+		why = decideSandboxOff(call, command, config)
 	}
-	if input.DangerouslyDisableSandbox != nil && *input.DangerouslyDisableSandbox || unsandboxedHarness(call) {
-		return decideSandboxOff(call, command, config)
+	if why != "" {
+		why += because
 	}
-	return ""
+	return why
+}
+
+// reachesRepository reports whether command, run from the session's directories, spells a path
+// inside this repository: any word (or the value after a "NAME=" or "--option=") that resolves
+// there, relative to the session's directories or to a directory a cd or pushd before it moved to,
+// with ~, $HOME and $PWD expanded, compared by file identity (within), so case and links do not
+// matter. A glob counts when this repository is inside the directory it is matched in. unknown says
+// why it cannot be told: a cd or pushd to a directory the hook cannot resolve, or a path built on a
+// variable it cannot expand. A tripwire like the rest: a path the command does not spell (a script
+// that changes directory) is not seen.
+func reachesRepository(command string, directories []string, config Config) (bool, string) {
+	var bases []string
+	for _, directory := range directories {
+		if filepath.IsAbs(directory) {
+			bases = append(bases, directory)
+		}
+	}
+	unknown := ""
+	marked := strings.NewReplacer("$(", " $SUBSTITUTION;", "`", " $SUBSTITUTION;").Replace(command)
+	for _, segment := range commandSegments(marked) {
+		words := strings.Fields(strings.NewReplacer(`"`, "", "'", "").Replace(segment))
+		for _, word := range words {
+			candidates := []string{word}
+			if _, value, found := strings.Cut(word, "="); found {
+				candidates = append(candidates, value)
+			}
+			for _, candidate := range candidates {
+				reaches, why := spellsRepositoryPath(candidate, bases, config)
+				if reaches {
+					return true, ""
+				}
+				if unknown == "" && why != "" && strings.Contains(candidate, "/") {
+					unknown = why
+				}
+			}
+		}
+		program := commandWords(words)
+		if len(program) == 0 || program[0] != "cd" && program[0] != "pushd" {
+			continue
+		}
+		target := config.Home
+		for _, word := range program[1:] {
+			if word != "-P" && word != "-L" {
+				target = word
+				break
+			}
+		}
+		moved, why := resolvedPaths(target, bases, config)
+		if why != "" || target == "-" {
+			if unknown == "" {
+				unknown = "it changes directory to " + target
+			}
+			continue
+		}
+		bases = append(bases, moved...)
+	}
+	return false, unknown
+}
+
+// spellsRepositoryPath reports whether word, resolved against bases, is a path in the repository,
+// or why it cannot be resolved.
+func spellsRepositoryPath(word string, bases []string, config Config) (bool, string) {
+	if word == "" {
+		return false, ""
+	}
+	if glob := strings.IndexAny(word, "*?[{"); glob >= 0 {
+		// The repository is reached if it is inside the directory the glob is matched in.
+		directories, why := resolvedPaths(filepath.Dir(word[:glob]+"x"), bases, config)
+		for _, directory := range directories {
+			if within(directory, config.Root) {
+				return true, ""
+			}
+		}
+		return false, why
+	}
+	paths, why := resolvedPaths(word, bases, config)
+	for _, path := range paths {
+		if within(config.Root, path) {
+			return true, ""
+		}
+	}
+	return false, why
+}
+
+// resolvedPaths is word as absolute paths, one per base when it is relative, with ~, $HOME and $PWD
+// expanded, or why it cannot be resolved (another variable, ~user).
+func resolvedPaths(word string, bases []string, config Config) ([]string, string) {
+	expanded := word
+	for _, home := range []string{"$HOME", "${HOME}"} {
+		if rest, found := strings.CutPrefix(expanded, home); found && (rest == "" || rest[0] == '/') {
+			expanded = config.Home + rest
+		}
+	}
+	if expanded == "~" || strings.HasPrefix(expanded, "~/") {
+		expanded = config.Home + expanded[1:]
+	}
+	if strings.HasPrefix(expanded, "~") {
+		return nil, word + " names another user's home"
+	}
+	if filepath.IsAbs(expanded) {
+		if strings.Contains(expanded, "$") {
+			return nil, word + " is built on a variable the hook cannot expand"
+		}
+		return []string{filepath.Clean(expanded)}, ""
+	}
+	var paths []string
+	for _, base := range bases {
+		path := expanded
+		for _, pwd := range []string{"$PWD", "${PWD}"} {
+			if rest, found := strings.CutPrefix(path, pwd); found && (rest == "" || rest[0] == '/') {
+				path = base + rest
+			}
+		}
+		if strings.Contains(path, "$") {
+			return nil, word + " is built on a variable the hook cannot expand"
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(base, path)
+		}
+		paths = append(paths, filepath.Clean(path))
+	}
+	return paths, ""
 }
 
 // unsandboxedHarness reports whether the event comes from a harness that sends no sandbox flag and
@@ -223,10 +360,7 @@ func decideSandboxOff(call event, command string, config Config) string {
 func runsTestsInSandbox(command string, config Config) string {
 	builds := map[string]string{"go": "-c", "cargo": "--no-run"}
 	for _, segment := range commandSegments(command) {
-		words := strings.Fields(segment)
-		for len(words) > 0 && isAssignment(words[0]) {
-			words = words[1:]
-		}
+		words := commandWords(strings.Fields(segment))
 		if len(words) == 0 {
 			continue
 		}
@@ -265,20 +399,107 @@ func commandSegments(command string) []string {
 }
 
 // firstWordMatching returns the first word of any command segment (commandSegments, assignments
-// skipped) that matches, or "". A tripwire: it is spelling-based.
+// and command wrappers skipped) that matches, or "". A tripwire: it is spelling-based.
 func firstWordMatching(command string, matches func(string) bool) string {
 	for _, segment := range commandSegments(command) {
-		for _, word := range strings.Fields(segment) {
-			if isAssignment(word) {
+		words := strings.Fields(segment)
+		for _, candidate := range [][]string{skipAssignments(words), commandWords(words)} {
+			if len(candidate) > 0 && matches(candidate[0]) {
+				return candidate[0]
+			}
+		}
+	}
+	return ""
+}
+
+// skipAssignments is words without the NAME=value assignments in front.
+func skipAssignments(words []string) []string {
+	for len(words) > 0 && isAssignment(words[0]) {
+		words = words[1:]
+	}
+	return words
+}
+
+// commandWrapper is how a program that runs its arguments as a command reads them: the short
+// options that take the next word as a value, the long ones that do, and how many plain arguments
+// come before the command (timeout's duration).
+type commandWrapper struct {
+	values     string
+	long       []string
+	positional int
+}
+
+// commandWrappers are the ordinary programs that run the rest of their arguments as a command. "env
+// go test ./..." ran tests inside the sandbox past a check that read only the first word (review of
+// PR 9, R5); a game binary or an excluded program behind one of these was missed the same way. A
+// shell's -c string is split into words like the rest, so "bash -c 'go test'" reads as go test.
+var commandWrappers = map[string]commandWrapper{
+	"env":        {values: "uPC", long: []string{"--unset", "--chdir"}},
+	"command":    {},
+	"exec":       {values: "a"},
+	"nohup":      {},
+	"time":       {},
+	"nice":       {values: "n", long: []string{"--adjustment"}},
+	"timeout":    {values: "sk", long: []string{"--signal", "--kill-after"}, positional: 1},
+	"caffeinate": {values: "tw"},
+	"stdbuf":     {values: "ioe"},
+	"xargs":      {values: "IELnPsJRd", long: []string{"--delimiter", "--max-args", "--max-procs", "--max-lines", "--replace", "--eof"}},
+	"sudo":       {values: "ugpChDRrTU", long: []string{"--user", "--group", "--prompt", "--chdir"}},
+	"sh":         {values: "o"},
+	"bash":       {values: "o"},
+	"zsh":        {values: "o"},
+}
+
+// commandWords is one command segment's words from the program that runs on: quote marks around
+// each word removed, then assignments and the wrappers in commandWrappers (with their options and
+// arguments) skipped, as often as they nest. The program's own name stays as spelled, path and all.
+func commandWords(words []string) []string {
+	trimmed := make([]string, len(words))
+	for index, word := range words {
+		trimmed[index] = strings.Trim(word, `'"`)
+	}
+	words = trimmed
+	for {
+		words = skipAssignments(words)
+		if len(words) == 0 {
+			return words
+		}
+		name := filepath.Base(words[0])
+		wrapper, known := commandWrappers[name]
+		if !known {
+			return words
+		}
+		words = words[1:]
+		positional := wrapper.positional
+		for len(words) > 0 {
+			word := words[0]
+			if word == "--" {
+				words = words[1:]
+				break
+			}
+			if name == "command" && (word == "-v" || word == "-V") {
+				return nil // it only says what the name is, and runs nothing
+			}
+			if strings.HasPrefix(word, "-") && len(word) > 1 {
+				words = words[1:]
+				takesValue := len(word) == 2 && strings.IndexByte(wrapper.values, word[1]) >= 0 || slices.Contains(wrapper.long, word)
+				if takesValue && len(words) > 0 {
+					words = words[1:]
+				}
 				continue
 			}
-			if matches(word) {
-				return word
+			if isAssignment(word) {
+				words = words[1:]
+				continue
+			}
+			if positional > 0 {
+				positional--
+				words = words[1:]
+				continue
 			}
 			break
 		}
 	}
-	return ""
 }
 
 // testGateOverrides are the variable-name spellings that would drop the test gate from a Rust
@@ -359,8 +580,13 @@ func LauncherForm(command string, config Config) (string, string) {
 }
 
 // runsTests reports whether a program and its arguments run tests: a test binary, or cargo or go
-// with a test, bench or nextest subcommand (cargo's t alias included).
+// with a test, bench or nextest subcommand (cargo's t alias included), behind any of
+// commandWrappers ("d1-localonly /usr/bin/env go test").
 func runsTests(words []string, config Config) bool {
+	words = commandWords(words)
+	if len(words) == 0 {
+		return false
+	}
 	if isTestBinary(words[0], config) || strings.HasSuffix(words[0], ".test") {
 		return true
 	}

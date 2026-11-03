@@ -151,7 +151,9 @@ var worktreeRoots = []string{".claude/worktrees", "runs"}
 // worktreeTarget returns "" unless canonical, an absolute resolved path, is a copy of a protected
 // file or a file in a protected tree inside one of this repository's worktrees, then why it is
 // refused. The worktree's own name is skipped and the rest of the path is read as a
-// repository-relative name.
+// repository-relative name. Every comparison is without case, as the volume compares names:
+// "RUNS/wt-demo" and "runs/WT-demo" are runs/wt-demo, and a case-sensitive prefix let both through
+// (review of PR 9, R3).
 func worktreeTarget(canonical string, config Config) string {
 	root, err := canonicalPath(config.Root)
 	if err != nil {
@@ -159,11 +161,11 @@ func worktreeTarget(canonical string, config Config) string {
 	}
 	for _, parent := range worktreeRoots {
 		prefix := filepath.Join(root, parent) + string(filepath.Separator)
-		if !underPath(canonical, filepath.Join(root, parent)) {
+		if !hasPrefixFold(canonical, prefix) {
 			continue
 		}
-		rest := strings.Split(strings.TrimPrefix(canonical, prefix), string(filepath.Separator))
-		if len(rest) < 2 || parent == "runs" && !strings.HasPrefix(rest[0], "wt-") {
+		rest := strings.Split(canonical[len(prefix):], string(filepath.Separator))
+		if len(rest) < 2 || parent == "runs" && !hasPrefixFold(rest[0], "wt-") {
 			continue
 		}
 		relative := strings.Join(rest[1:], "/")

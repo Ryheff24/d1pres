@@ -95,6 +95,51 @@ func TestContainmentRegression(t *testing.T) {
 			{"wrapped_test", "env go test ./...", true},
 		})
 	})
+
+	// The same gaps in the forms beside the ones the review probed: other spellings of a codex
+	// option or of an output file, a game binary or test behind a wrapper, and a cd the hook cannot
+	// resolve. Each unsafe case has an admitted control of the same shape.
+	t.Run("SiblingForms", func(t *testing.T) {
+		config := fakeTree(t)
+		outside := filepath.Join(config.Home, "result.md")
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"owner_codex_pattern_control", "codex exec -m gpt-6.1-sol -c model_reasoning_effort='\"high\"' -s read-only -C \"$PWD\" --color never -o docs/r.md - <<'EOF' > \"$TMPDIR/codex.log\" 2>&1\ntask\nEOF", false},
+			{"clustered_sandbox", "codex exec -hsdanger-full-access -", true},
+			{"equals_sandbox", "codex exec -s=danger-full-access -", true},
+			{"long_equals_sandbox", "codex exec --sandbox=danger-full-access -", true},
+			{"quoted_sandbox_value", "codex exec -s 'danger-full-access' -", true},
+			{"unknown_option", "codex exec --some-new-option -", true},
+			{"feature_flag", "codex exec --enable some_feature -", true},
+			{"split_variable", "codex exec $FLAGS -", true},
+			{"cd_outside", "codex exec -s workspace-write -C " + config.Home + " -", true},
+			{"cd_inside_control", "codex exec -s workspace-write -C " + config.Root + " -", false},
+			{"add_dir_home", "codex exec -s workspace-write --add-dir ~ -", true},
+			{"redirect_home", "codex exec -s read-only - > $HOME/.zshrc", true},
+			{"redirect_outside", "codex exec -s read-only - > " + outside, true},
+			{"redirect_inside_control", "codex exec -s read-only - > docs/out.md 2>&1", false},
+			{"redirect_null_control", "xcodebuild -version > /dev/null", false},
+			{"redirect_temporary_escape", "codex exec -s read-only - > $TMPDIR/../x", true},
+			{"wrapped_game", "nice -n 5 d1-recomp run", true},
+			{"shell_wrapped_test", "bash -c 'go test ./...'", true},
+			{"timeout_wrapped_test", "timeout 60 go test ./...", true},
+			{"lookup_control", "command -v codex", false},
+		})
+		checkCommandDecisions(t, config, config.Root, true, []commandDecisionCase{
+			{"localonly_wrapped_test", config.LauncherDirectory + "/d1-localonly /usr/bin/env go test ./...", true},
+		})
+		elsewhere := config.Home
+		checkCommandDecisions(t, config, elsewhere, true, []commandDecisionCase{
+			{"unresolved_cd", "cd $REPO && cp x CLAUDE.md", true},
+			{"substituted_cd", "cd $(git rev-parse --show-toplevel) && cp x CLAUDE.md", true},
+			{"variable_path", "cp x $REPO/CLAUDE.md", true},
+			{"case_variant_root", "cp x " + filepath.Join(filepath.Dir(config.Root), "REPO", "CLAUDE.md"), true},
+			{"home_relative", "cp x ~/../repo/CLAUDE.md", true},
+			{"glob_into_root", "cp x ../re*/CLAUDE.md", true},
+			{"plain_variable_control", "echo $PATH", false},
+			{"cd_elsewhere_control", "cd ../home && cp x y", false},
+			{"home_control", "cp x ~/notes.md", false},
+		})
+	})
 }
 
 type commandDecisionCase struct {

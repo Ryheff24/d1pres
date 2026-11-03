@@ -33,7 +33,8 @@ The follow-up adds [containment_regression_test.go](/Users/ryanheffernan/Documen
 with one `TestContainmentRegression` group per finding. These tests assert the intended
 security behavior: unsafe forms must be refused and allowed controls must pass.
 They have no expected-failure switch or skip, and are included automatically in
-the existing hook package and coverage workflow. Production hook code is unchanged.
+the existing hook package and coverage workflow. Production hook code was unchanged when they were
+added; the fixes followed, and they now pass (see "Fixes" below).
 
 The hook package was compiled with `go test -c` in the agent sandbox, with a fresh
 temporary build cache and `GOPROXY=off`. The compiled binary then ran through the
@@ -63,6 +64,35 @@ These are deliberately failing regression requirements against the reviewed
 implementation. They must turn green when the fixes land, without removing the
 unsafe cases or weakening their expected refusal. No test covers the separately
 deferred host configuration, server gates, or missing imports in d1preservation.
+
+## Fixes (2026-11-03, later the same day)
+
+R1 to R5 are fixed in the hook; the regression tests above are unchanged and pass. A
+`SiblingForms` group was added beside them for the same gaps in neighbouring spellings: 20 unsafe
+cases and 10 admitted controls (the owner's own codex line among them).
+
+| Finding | Fix |
+|---|---|
+| R1 | `shellArguments` (shell.go) reads the excluded program's line as bash hands it over: quotes removed, redirections apart, each word marked when an expansion is left in it. `codexForm` reads options as clap does (`-sVALUE`, `-s=VALUE`, `-hsVALUE`, `--name=VALUE`), refuses any option not in codex exec 0.160.0's `--help`, refuses `--enable`/`--disable` like the `-c features.NAME` they stand for, and refuses any non-literal word before `--` except `-C "$PWD"`. |
+| R2 | `-o` takes only a literal path, so `$HOME/.zshrc` and `~/...` are refused. The same rule now covers redirections (`redirectsInRepository`): a spelled-out path in the repository that is not protected, `/dev/null`/`stdout`/`stderr`, or `$TMPDIR/NAME`. `-C`/`--cd` and `--add-dir` must stay in the repository, since workspace-write writes there. |
+| R3 | `worktreeTarget` (protect.go) trims the worktree prefix and matches `wt-` without case. |
+| R4 | `reachesRepository` (hook.go) resolves every word, and every `cd`/`pushd` target, against the session's directories, with `~`, `$HOME` and `$PWD` expanded and file identity compared. With the sandbox off, a `cd` it cannot resolve or a path built on another variable applies the repository's rules (fail closed), and the refusal says why. |
+| R5 | `commandWords` (hook.go) skips assignments and ordinary wrappers (`env`, `nice`, `timeout`, `time`, `nohup`, `xargs`, `sudo`, `command`, `exec`, `caffeinate`, `stdbuf`, `sh`/`bash`/`zsh -c`). It is used for test detection, for game binaries and excluded programs (`firstWordMatching`), and for `d1-localonly` (`runsTests`). |
+
+How this was run: the hook package was compiled in the agent sandbox and run under `d1-nonet`
+from the d1preservation working directory. Result: `TestContainmentRegression` had 59 leaf cases
+passing, none failing or skipped. Every other hook-package test passed except `TestAccessMatrix`,
+whose probe half passed; its doc comparison could not open `../../agent-containment.md` from that
+directory, and d1-nonet refuses a d1remote working directory (no `design/`, no `d1-server/`). The
+comparison was rerun as a plain program against d1remote's doc, and it matches. The outer suite's
+`hook_test.go` (TestHookLauncherForm, Bash, Tripwire, Edits, Patches, FailsClosed, Harnesses,
+ReachesIn) was run as an A/B, built once against this head and once against the fixes, with
+fixture writes the game profile denies skipped. All 8 passed on both. The full containment suite
+still needs the owner's `install.sh`.
+
+Still open, and outside this repository's code: the seven test packages without the gate import,
+and the package-coverage control, both in d1preservation (R5's second half). The other deferred
+items in the table below are unchanged.
 
 ## Findings requiring changes
 

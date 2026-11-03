@@ -75,6 +75,17 @@ var codexDangerous = []string{"--dangerously-bypass-approvals-and-sandbox", "--d
 var codexConfigKeys = []string{"model_reasoning_effort", "model_reasoning_summary", "model_verbosity", "model_supports_reasoning_summaries", "hide_agent_reasoning", "include_plan_tool"}
 var codexSandboxes = []string{"read-only", "workspace-write"}
 
+// codexValueOptions are codex exec's options that take a value and codexFlags those that take none,
+// by long name; codexShort maps the short spellings to them. Read from "codex exec --help" of
+// 0.160.0 (2026-11-03). Clap also reads "-sVALUE", "-s=VALUE" and "-hsVALUE", so a short word is
+// read letter by letter (review of PR 9, R1), and an option not listed here is refused: what it
+// does to the sandbox cannot be told.
+var codexValueOptions = []string{"config", "enable", "disable", "image", "model", "local-provider", "profile", "sandbox", "cd", "add-dir",
+	"thread-source", "cyber-access-program", "output-schema", "color", "output-last-message"}
+var codexFlags = []string{"strict-config", "oss", "approve-for-me", "worktree", "skip-git-repo-check", "ephemeral", "ignore-user-config",
+	"ignore-rules", "json", "help", "version"}
+var codexShort = map[byte]string{'c': "config", 'i': "image", 'm': "model", 'p': "profile", 's': "sandbox", 'C': "cd", 'o': "output-last-message", 'h': "help", 'V': "version"}
+
 // isExcludedName reports whether word names an excluded program, by name or by any path.
 func isExcludedName(word string) bool {
 	return slices.Contains(excludedNames, filepath.Base(word))
@@ -92,19 +103,30 @@ func isExcludedName(word string) bool {
 // outside every sandbox whatever the sandbox flag says, so before this
 // "xcodebuild -version > CLAUDE.md" and "codex exec -o ~/.claude/settings.json" were admitted. The
 // heredoc body is left out of that check, because a codex prompt names protected files as data.
+//
+// The arguments are checked as the program receives them (shellArguments: quotes removed,
+// redirections apart), not as strings.Fields spells them: "'--dangerously-bypass-approvals-and-sandbox'"
+// was a word no option matched, and the shell handed codex the bare flag (review of PR 9, R1). A
+// redirection writes outside every sandbox like codex's -o does, so its file is held to the same
+// place (redirectsInRepository, R2).
 func ExcludedForm(command string, cwd string, config Config) string {
 	line, rest := logicalLine(command)
 	delimiter, why := scanShell(line)
 	if why != "" {
 		return "a command naming an excluded program must be that program alone: " + why
 	}
-	words := strings.Fields(line)
-	if len(words) == 0 || !isExcludedName(words[0]) || strings.Contains(words[0], "/") && !slices.Contains(excludedPaths, words[0]) {
+	arguments, redirects := shellArguments(line)
+	if len(arguments) == 0 || !arguments[0].literal || !isExcludedName(arguments[0].text) ||
+		strings.Contains(arguments[0].text, "/") && !slices.Contains(excludedPaths, arguments[0].text) {
 		return "a command naming an excluded program must start with it, by name or as one of " + strings.Join(excludedPaths, ", ")
+	}
+	words := make([]string, len(arguments))
+	for index, argument := range arguments {
+		words[index] = argument.text
 	}
 	name := filepath.Base(words[0])
 	subcommand := ""
-	if len(words) > 1 {
+	if len(words) > 1 && arguments[1].literal {
 		subcommand = words[1]
 	}
 	if name == "copilot" {
@@ -121,7 +143,7 @@ func ExcludedForm(command string, cwd string, config Config) string {
 		return why
 	}
 	if name == "codex" {
-		if why := codexForm(words[1:], cwd, config); why != "" {
+		if why := codexForm(arguments[2:], cwd, config); why != "" {
 			return why
 		}
 	}
@@ -133,54 +155,189 @@ func ExcludedForm(command string, cwd string, config Config) string {
 	if why := Tripwire(line, config); why != "" {
 		return why
 	}
-	return ""
+	return redirectsInRepository(redirects, cwd, config)
 }
 
-// codexForm returns "" when codex exec's arguments leave its own sandbox and hook trust in place
-// and write their output inside this repository: no option in codexDangerous, "-s"/"--sandbox" only
-// read-only or workspace-write, "-c"/"--config" only the keys in codexConfigKeys (never
-// sandbox_mode), and "-o"/"--output" only a path in the repository that is not protected. Without
-// these, codex runs arbitrary code outside every sandbox with the owner's credentials, which is what
-// the sandbox exclusion was for one program's own sandbox, not for turning that one off (audit N3).
-func codexForm(arguments []string, cwd string, config Config) string {
-	for index, argument := range arguments {
-		option, value, inline := strings.Cut(argument, "=")
-		next := func() (string, bool) {
-			if inline {
-				return value, true
-			}
-			if index+1 < len(arguments) {
-				return arguments[index+1], true
-			}
-			return "", false
+// codexForm returns "" when codex exec's arguments (after "exec") leave its own sandbox and hook
+// trust in place and write their output inside this repository: no option in codexDangerous,
+// "-s"/"--sandbox" only read-only or workspace-write, "-c"/"--config" only the keys in
+// codexConfigKeys (never sandbox_mode; --enable and --disable are -c features.NAME by another
+// name), "-o"/"--output-last-message" only a path in the repository that is not protected, and
+// "-C"/"--cd" and "--add-dir", the directories workspace-write lets it write, only inside the
+// repository. Without these, codex runs arbitrary code outside every sandbox with the owner's
+// credentials, which is what the sandbox exclusion was for one program's own sandbox, not for
+// turning that one off (audit N3).
+//
+// Every word before "--" must be literal: an unquoted $NAME can split into options, and a path
+// with $HOME or ~ in it is not the path codex is handed (review of PR 9, R1 and R2). The one
+// expansion admitted is the owner's own "-C \"$PWD\"", which is the session's directory.
+func codexForm(arguments []shellWord, cwd string, config Config) string {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if argument.literal && argument.text == "--" {
+			return ""
 		}
+		if !argument.literal {
+			return "codex " + argument.text + ": a word with an expansion ($, ~, a glob or braces) is not what codex is " +
+				"handed, and can become an option; spell it out, or pass the prompt on stdin (-) from a quoted heredoc"
+		}
+		text := argument.text
+		if text == "-" || !strings.HasPrefix(text, "-") {
+			continue
+		}
+		var option string
+		var value *shellWord
+		if long, found := strings.CutPrefix(text, "--"); found {
+			name, inline, hasInline := strings.Cut(long, "=")
+			option = name
+			if hasInline {
+				value = &shellWord{text: inline, literal: true}
+			}
+		} else {
+			for position := 1; position < len(text); position++ {
+				name, known := codexShort[text[position]]
+				if !known {
+					return "codex " + text + ": -" + string(text[position]) + " is not one of codex exec's options, so what it " +
+						"does to the sandbox cannot be told"
+				}
+				option = name
+				if slices.Contains(codexValueOptions, name) {
+					if rest := strings.TrimPrefix(text[position+1:], "="); rest != "" {
+						value = &shellWord{text: rest, literal: true}
+					}
+					break
+				}
+			}
+		}
+		takesValue := slices.Contains(codexValueOptions, option)
 		switch {
-		case slices.Contains(codexDangerous, option) || strings.HasPrefix(option, "--dangerously"):
-			return "codex " + argument + " turns off the sandbox codex applies to its own tools, or the trust it asks for " +
+		case slices.Contains(codexDangerous, "--"+option) || strings.HasPrefix(option, "dangerously"):
+			return "codex " + text + " turns off the sandbox codex applies to its own tools, or the trust it asks for " +
 				"its hooks; it is refused here. Run codex exec -s read-only (or -s workspace-write when the task is to edit)"
-		case option == "-c" || option == "--config":
-			setting, _ := next()
-			key, _, _ := strings.Cut(setting, "=")
-			if !slices.Contains(codexConfigKeys, key) {
-				return "codex -c " + setting + " is not admitted: configuration can turn the sandbox off (sandbox_mode) " +
-					"as surely as a flag. The keys admitted here: " + strings.Join(codexConfigKeys, ", ")
+		case !takesValue && !slices.Contains(codexFlags, option):
+			return "codex " + text + " is not one of codex exec's options, so what it does to the sandbox cannot be told"
+		case !takesValue && value != nil:
+			return "codex " + text + ": --" + option + " takes no value"
+		case !takesValue:
+			continue
+		}
+		if value == nil {
+			if index+1 >= len(arguments) {
+				return "codex " + text + " needs a value"
 			}
-		case option == "-s" || option == "--sandbox":
-			mode, found := next()
-			if !found || !slices.Contains(codexSandboxes, mode) {
-				return "codex -s " + mode + " is not admitted; codex runs here as -s " + strings.Join(codexSandboxes, " or -s ")
-			}
-		case option == "-o" || option == "--output" || option == "--output-last-message":
-			path, found := next()
-			if !found {
-				return "codex " + option + " needs a path"
-			}
-			if why := outputInRepository(path, cwd, config); why != "" {
-				return "codex " + option + " " + path + ": " + why
-			}
+			index++
+			value = &arguments[index]
+		}
+		if !value.literal && !(option == "cd" && isPWD(value.text)) {
+			return "codex " + text + " " + value.text + ": a value with an expansion ($, ~, a glob or braces) is not the " +
+				"value codex is handed; spell it out"
+		}
+		if why := codexValue(option, value.text, cwd, config); why != "" {
+			return why
 		}
 	}
 	return ""
+}
+
+// codexValue returns "" when value is admitted for codex exec's --option.
+func codexValue(option string, value string, cwd string, config Config) string {
+	switch option {
+	case "config", "enable", "disable":
+		key, _, _ := strings.Cut(value, "=")
+		if option != "config" {
+			key = "features." + value
+		}
+		if !slices.Contains(codexConfigKeys, key) {
+			return "codex --" + option + " " + value + " is not admitted: configuration can turn the sandbox off (sandbox_mode) " +
+				"as surely as a flag. The keys admitted here: " + strings.Join(codexConfigKeys, ", ")
+		}
+	case "sandbox":
+		if !slices.Contains(codexSandboxes, value) {
+			return "codex -s " + value + " is not admitted; codex runs here as -s " + strings.Join(codexSandboxes, " or -s ")
+		}
+	case "output-last-message":
+		if why := outputInRepository(value, cwd, config); why != "" {
+			return "codex -o " + value + ": " + why
+		}
+	case "cd", "add-dir":
+		if isPWD(value) {
+			value = cwd
+		}
+		if why := directoryInRepository(value, cwd, config); why != "" {
+			return "codex --" + option + " " + value + ": " + why
+		}
+	}
+	return ""
+}
+
+// isPWD reports whether text is the expansion of the shell's working directory and nothing else.
+func isPWD(text string) bool {
+	return text == "$PWD" || text == "${PWD}"
+}
+
+// directoryInRepository returns "" when path is this repository or a directory inside it: codex's
+// workspace-write sandbox lets it write there, and it runs outside every other sandbox.
+func directoryInRepository(path string, cwd string, config Config) string {
+	if !filepath.IsAbs(path) {
+		if !filepath.IsAbs(cwd) {
+			return "it is relative and the session has no working directory"
+		}
+		path = filepath.Join(cwd, path)
+	}
+	canonical, err := canonicalPath(filepath.Clean(path))
+	if err != nil {
+		return err.Error()
+	}
+	root, err := canonicalPath(config.Root)
+	if err != nil {
+		return "the repository root cannot be resolved"
+	}
+	if !underPath(canonical, root) {
+		return "codex's own sandbox writes where it is pointed, and it is pointed inside " + config.Root + ", nowhere else"
+	}
+	return ""
+}
+
+// redirectsInRepository returns "" when every file a redirection writes is one an excluded program
+// may write: a literal path that outputInRepository admits, /dev/null, /dev/stdout or /dev/stderr,
+// or the session's temporary directory spelled $TMPDIR/NAME (the owner's codex log). A redirection
+// is opened by the shell, which the sandbox exclusion runs outside every sandbox, so before this
+// "codex exec - > $HOME/.zshrc" wrote where -o was refused (review of PR 9, R2). Reading
+// redirections, heredocs and descriptor merges write no file.
+func redirectsInRepository(redirects []shellRedirect, cwd string, config Config) string {
+	for _, redirect := range redirects {
+		target := redirect.target
+		switch {
+		case strings.HasPrefix(redirect.operator, "<") && redirect.operator != "<>":
+			continue
+		case strings.HasSuffix(redirect.operator, "&") && target.literal && (target.text == "-" || strings.Trim(target.text, "0123456789") == ""):
+			continue
+		case target.literal && slices.Contains([]string{"/dev/null", "/dev/stdout", "/dev/stderr"}, target.text):
+			continue
+		case !target.literal && inTemporaryDirectory(target.text):
+			continue
+		case !target.literal:
+			return redirect.operator + " " + target.text + ": the file a redirection writes must be spelled out (or be " +
+				"$TMPDIR/NAME): the shell expands it outside every sandbox, and the hook cannot tell where it lands"
+		}
+		if why := outputInRepository(target.text, cwd, config); why != "" {
+			return redirect.operator + " " + target.text + ": " + why + " (or under $TMPDIR)"
+		}
+	}
+	return ""
+}
+
+// inTemporaryDirectory reports whether text is $TMPDIR (or ${TMPDIR}) followed by a plain relative
+// path: letters, digits, ".", "_", "-" and "/", with no ".." step out of it.
+func inTemporaryDirectory(text string) bool {
+	rest, found := strings.CutPrefix(text, "$TMPDIR/")
+	if !found {
+		rest, found = strings.CutPrefix(text, "${TMPDIR}/")
+	}
+	if !found || rest == "" || strings.Trim(rest, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/") != "" {
+		return false
+	}
+	return !slices.Contains(strings.Split(rest, "/"), "..")
 }
 
 // outputInRepository returns "" when path is a file codex may write: inside the repository (codex
@@ -294,6 +451,91 @@ func scanShell(line string) (string, string) {
 		return "", "an unclosed quote"
 	}
 	return delimiter, ""
+}
+
+// shellWord is one word of a command as the program receives it: quotes removed, and literal false
+// when the shell would still change it ($ outside single quotes; ~, *, ?, [, { or } unquoted).
+type shellWord struct {
+	text    string
+	literal bool
+}
+
+// shellRedirect is one redirection: its operator (">", ">>", "2>", "&>", ">&", "<", "<<", "<<-",
+// "<>", ...) and the word after it (a file, a descriptor, or a heredoc delimiter).
+type shellRedirect struct {
+	operator string
+	target   shellWord
+}
+
+// shellArguments splits a line that scanShell admitted into the words the program is handed and
+// its redirections. scanShell has already refused backslashes, backquotes, $(, comments and every
+// operator that starts a second command, so only quotes and redirections are left to read here.
+func shellArguments(line string) ([]shellWord, []shellRedirect) {
+	var arguments []shellWord
+	var redirects []shellRedirect
+	var word strings.Builder
+	inWord, literal, quoted := false, true, false
+	operator := ""
+	end := func() {
+		if !inWord {
+			return
+		}
+		finished := shellWord{text: word.String(), literal: literal}
+		if operator != "" {
+			redirects = append(redirects, shellRedirect{operator: operator, target: finished})
+			operator = ""
+		} else {
+			arguments = append(arguments, finished)
+		}
+		word.Reset()
+		inWord, literal, quoted = false, true, false
+	}
+	quote := byte(0)
+	for index := 0; index < len(line); index++ {
+		character := line[index]
+		switch {
+		case quote == '\'':
+			if character == '\'' {
+				quote = 0
+			} else {
+				word.WriteByte(character)
+			}
+		case quote == '"':
+			if character == '"' {
+				quote = 0
+			} else {
+				literal = literal && character != '$'
+				word.WriteByte(character)
+			}
+		case character == '\'' || character == '"':
+			quote, inWord, quoted = character, true, true
+		case character == ' ' || character == '\t':
+			end()
+		case character == '<' || character == '>' || character == '&':
+			// A descriptor number written against the operator ("2>") belongs to it.
+			descriptor := ""
+			if inWord && !quoted && word.Len() > 0 && strings.Trim(word.String(), "0123456789") == "" {
+				descriptor = word.String()
+				word.Reset()
+				inWord = false
+			}
+			end()
+			start := index
+			for index+1 < len(line) && strings.IndexByte("<>&", line[index+1]) >= 0 {
+				index++
+			}
+			if strings.HasPrefix(line[start:index+1], "<<") && index+1 < len(line) && line[index+1] == '-' {
+				index++
+			}
+			operator = descriptor + line[start:index+1]
+		default:
+			literal = literal && strings.IndexByte("$~*?[{}", character) < 0
+			word.WriteByte(character)
+			inWord = true
+		}
+	}
+	end()
+	return arguments, redirects
 }
 
 // around is the byte before index (0 at the start), the byte at it, and the byte after it (0 at the end).

@@ -100,7 +100,10 @@ on it. A test that needs a socket fails, visibly, and gets an in-memory transpor
   only build (`-c`, `--no-run`), and the refusal prints the two commands above. Before this only a
   sandbox-off test run was refused, so the common case — a plain `go test ./...` inside the sandbox,
   where loopback is open and egress goes through the proxy — passed, and the owner's rule held in
-  prose only (audit 2026-10-31, N7).
+  prose only (audit 2026-10-31, N7). The program is read past ordinary wrappers (`env`, `nice`,
+  `timeout`, `time`, `nohup`, `xargs`, `sudo`, `command`, `exec`, `caffeinate`, `stdbuf`, and a
+  shell's `-c` string), here, for game binaries and excluded programs, and behind `d1-localonly`:
+  `env go test ./...` passed before (`commandWords`, review of PR 9, R5).
 - **It also refuses the spellings that would drop the Rust gate** (`RUSTFLAGS`, `RUSTDOCFLAGS` and
   their `CARGO_*` forms, `RUSTC`, `RUSTC_WRAPPER`, `CARGO_TARGET_*_LINKER` and `_RUNNER`, cargo's
   `--config`). That part is a tripwire; the gate in the binary is the lock.
@@ -126,6 +129,8 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
 - **A worktree's copy counts too**: under `.claude/worktrees/*` and `runs/wt-*`, a file whose
   repository-relative name is a protected file, or is inside a protected tree, is refused (N6). A
   worktree holds its own `d1-recomp/src/main.rs` and `build.rs`, which is where the gate is called.
+  The worktree directories match without case, as the volume does: `RUNS/wt-x` and `runs/WT-x` are
+  `runs/wt-x` (review of PR 9, R3).
 - **The three places they are enforced:** the hook refuses the edit tools and `apply_patch`
   (`ProtectedTarget`), `local.sb` denies writes to each (and to every directory above one as an
   exact path, so a rename cannot get around a file rule), and `~/.claude/settings.json` carries one
@@ -155,8 +160,14 @@ Only Claude Code sends `dangerouslyDisableSandbox`, so the flag cannot be the wh
 An unsandboxed shell is what a harness that says nothing has, so it is treated as one and gets the
 launcher form or nothing (fail closed, 2026-10-27 review §2). No Cursor hook is registered on this
 Mac, so that path is proved only by `TestHookHarnesses`. A session working elsewhere meets these
-rules when its cwd is in, inside or above the repository, **or when the command spells the
-repository root** (audit N9: a sandbox-off `cp x <repo>/CLAUDE.md` from another project passed).
+rules when its cwd is in, inside or above the repository, **or when the command spells a path in
+it** (audit N9: a sandbox-off `cp x <repo>/CLAUDE.md` from another project passed). Every word is
+resolved against the session's directories and any `cd` or `pushd` before it, with `~`, `$HOME`
+and `$PWD` expanded and compared by file identity, so `cp x ../repo/CLAUDE.md` and
+`cd ../repo && go test ./...` count as surely as the absolute root (`reachesRepository`, review of
+PR 9, R4). With the sandbox off, a `cd` the hook cannot resolve (`cd $X`, `cd $(...)`, `cd -`) or a
+path built on another variable (`$X/CLAUDE.md`) applies these rules too: where the command lands
+cannot be told. A path the command does not spell (a script that changes directory) is not seen.
 
 ## Access control matrix (owner, 2026-10-25)
 
@@ -261,10 +272,22 @@ decides it per call (`containment/go/hook/elevated.go`). The ids and the dates a
   - the command line itself goes through the tripwire (audit 2026-10-31, N2). Before this,
     `xcodebuild -version > CLAUDE.md` and `codex exec -o ~/.claude/settings.json` were admitted. A
     quoted heredoc's body is still data, so a codex prompt may name protected files.
+  - The arguments are checked as the program receives them, quotes removed (`shellArguments`).
+    Before, `'--dangerously-bypass-approvals-and-sandbox'` in quotes and `-sdanger-full-access`
+    attached were admitted (review of PR 9, R1).
+  - A redirection writes outside every sandbox, so its file is a spelled-out path inside the
+    repository that is not protected, `/dev/null`/`stdout`/`stderr`, or `$TMPDIR/NAME` (the owner's
+    codex log). `codex exec - > $HOME/.zshrc` was admitted before (R2's sibling).
   - `codex` keeps its own sandbox and its hook trust (N3): `--dangerously-*` and `--yolo` are
     refused, `-s` is `read-only` or `workspace-write`, `-c`/`--config` only takes the keys in
-    `codexConfigKeys` (so never `sandbox_mode=danger-full-access`), and `-o`/`--output` writes only
-    a path inside the repository that is not protected.
+    `codexConfigKeys` (so never `sandbox_mode=danger-full-access`; `--enable`/`--disable` are
+    `-c features.NAME` and refused), `-o`/`--output-last-message` writes only a path inside the
+    repository that is not protected, and `-C`/`--cd` and `--add-dir`, which workspace-write lets it
+    write, stay inside the repository. Options are read as clap reads them (`-sVALUE`, `-s=VALUE`,
+    `-hsVALUE`, `--sandbox=VALUE`), and an option not in codex exec 0.160.0's `--help` is refused.
+    Before `--`, every word must be literal (no `$`, `~`, glob or braces): `$HOME/.zshrc` is not
+    the path codex is handed, and an unquoted `$X` can split into options (R1, R2). The one
+    expansion admitted is `-C "$PWD"`, the session's directory.
   - `security` is admitted only as `find-identity`: its other subcommands read the keychain
     (`find-generic-password -w` prints a password). `xcrun` only queries the SDK (`--show-sdk-*`,
     `-f`, `--find`, `--sdk NAME` with one of them) or starts `simctl` or `devicectl`.
