@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"d1preservation/netguard/gate"
 )
@@ -98,14 +99,76 @@ func decidePatch(input toolInput, cwd string, config Config) string {
 // protected trees (gate.ProtectedTrees, which also cover a file nobody has listed yet), and the
 // same two against the repository-relative name a path has inside a worktree, where the gate call
 // sites and the containment sources are copied (audit 2026-10-31, N6).
+//
+// Each rule is applied to two readings of the path, and either one refuses: the path as spelled
+// with "." and ".." removed by name (what a writer that cleans the path first opens), and the path
+// as the kernel opens it (physicalPath: a link resolved before the ".." after it). With a link
+// x -> containment/go/hook, "x/../hook/p_test.go" read by name is <repo>/hook/p_test.go, and the
+// kernel writes containment/go/hook/p_test.go (security review of PR 9, 2026-11-03).
 func ProtectedTarget(path string, cwd string, config Config) string {
+	paths, why := writeReadings(path, cwd)
+	if why != "" {
+		return why
+	}
+	for _, reading := range paths {
+		if why := protectedAt(reading, config); why != "" {
+			return why
+		}
+	}
+	return ""
+}
+
+// writeReadings is path made absolute against cwd, as its two readings: cleaned by name, and as
+// the kernel resolves it (physicalPath). why says why it has none.
+func writeReadings(path string, cwd string) ([]string, string) {
 	if !filepath.IsAbs(path) && !filepath.IsAbs(cwd) {
-		return path + " (a relative path, and no working directory to resolve it)"
+		return nil, path + " (a relative path, and no working directory to resolve it)"
 	}
 	if !filepath.IsAbs(path) {
-		path = filepath.Join(cwd, path)
+		path = cwd + string(filepath.Separator) + path
 	}
-	target, err := locate(filepath.Clean(path))
+	physical, err := physicalPath(path)
+	if err != nil {
+		return nil, err.Error()
+	}
+	return []string{filepath.Clean(path), physical}, ""
+}
+
+// physicalPath is path, absolute and not cleaned, resolved the way the kernel opens it: name by
+// name from the root, a symbolic link replaced by its target where it is met, and ".." taken from
+// the directory reached so far rather than from the spelling (filepath.EvalSymlinks does this when
+// the path is not cleaned first). The names below its deepest existing part are appended as they
+// are; a ".." among them is refused, since the kernel fails there and what it would mean cannot be
+// told.
+func physicalPath(path string) (string, error) {
+	names := strings.Split(path, string(filepath.Separator))
+	for count := len(names); count > 0; count-- {
+		prefix := strings.Join(names[:count], string(filepath.Separator))
+		if prefix == "" {
+			prefix = string(filepath.Separator)
+		}
+		real, err := filepath.EvalSymlinks(prefix)
+		if err != nil {
+			continue
+		}
+		parts := []string{real}
+		for _, name := range names[count:] {
+			switch name {
+			case "", ".":
+				continue
+			case "..":
+				return "", fmt.Errorf("%s steps back out of a directory that does not exist, so where it writes cannot be told", path)
+			}
+			parts = append(parts, name)
+		}
+		return filepath.Join(parts...), nil
+	}
+	return "", fmt.Errorf("no part of %s exists", path)
+}
+
+// protectedAt applies ProtectedTarget's rules to one absolute, cleaned reading of a path.
+func protectedAt(path string, config Config) string {
+	target, err := locate(path)
 	if err != nil {
 		return err.Error()
 	}
@@ -118,7 +181,16 @@ func ProtectedTarget(path string, cwd string, config Config) string {
 			return refusedAs(protected)
 		}
 	}
-	canonical, err := canonicalPath(filepath.Clean(path))
+	if len(target.missing) == 0 && target.existing.Mode().IsRegular() {
+		// A file with a second name shares its contents with that name, wherever it is: a hard link
+		// made from a file in a protected tree is written through by a path the tree rule does not
+		// see (the named files above are compared by inode, so they are caught already).
+		if status, readable := target.existing.Sys().(*syscall.Stat_t); !readable || status.Nlink > 1 {
+			return path + " is a file with more than one name (a hard link), and writing it changes the file under every " +
+				"name it has, which may be a protected one; write a new file instead"
+		}
+	}
+	canonical, err := canonicalPath(path)
 	if err != nil {
 		return err.Error()
 	}
@@ -303,7 +375,8 @@ func Tripwire(command string, config Config) string {
 func howToRead(name string) string {
 	return "To read it: the Read tool, or one of " + strings.Join(readers, ", ") +
 		", git " + strings.Join(gitReaders, "/") + ", cargo " + strings.Join(cargoReaders, "/") +
-		", alone or piped into another of those, with no \";\", \"&\", \"&&\", \">\", \"`\", \"$(\", heredoc or tee" +
+		", alone or piped into another of those, with no \";\", \"&\", \"&&\", \">\", \"`\", \"$(\", heredoc or tee, " +
+		"and no word starting with \"#\", \"$'\", \"${\" or unquoted \"(\"" +
 		" (a descriptor merge such as 2>&1 is fine, and a quoted or escaped \"|\" is text). " +
 		"To change it: show the owner the change (containment/agent-containment.md, point 5), or write a complete " +
 		"file under your scratchpad window directory, named so the command does not spell " + name + "."
@@ -321,6 +394,14 @@ type shellRead struct {
 // an expansion that runs a command, a backslash makes the next character literal (and a
 // backslash-newline joins lines), ";" "&" "|" ">" "<" backquote and "$(" are operators outside
 // quotes, "N>&N" is a descriptor merge and writes no file, and tee is matched as a word.
+//
+// What it does not model it refuses, because a quote it reads where the shell sees none hides the
+// rest of the line (security review of PR 9, 2026-11-03): a "#" that starts a word (a comment, so a
+// "'" after it opens nothing and the next line runs), "$'" and "$\"" (ANSI-C quoting, where "\'"
+// does not end the string), "${" (zsh's (e) flag runs what the expansion holds), an unquoted "("
+// (a subshell, bash or zsh process substitution "=(...)", or a zsh glob qualifier "*(e:...:)",
+// which runs code), and ">&WORD" when WORD is not all digits or "-" (">&1/../CLAUDE.md" writes the
+// file 1/../CLAUDE.md, stdout and stderr both).
 func readForTripwire(command string) shellRead {
 	var read shellRead
 	var words []string
@@ -370,12 +451,27 @@ func readForTripwire(command string) shellRead {
 			case character == '$' && next == '(':
 				note("\"$(\" runs another command")
 				index++
+			case character == '$' && next == '{':
+				note("\"${\" expands a parameter, and zsh's (e) flag runs what it holds")
+				keep(character)
 			case character == '\\' && index+1 < len(command):
 				index++
 				keep(command[index])
 			default:
 				keep(character)
 			}
+		case character == '#' && !inWord:
+			note("\"#\" starts a comment, so a quote after it is no quote to the shell and the next line runs")
+			keep(character)
+		case character == '$' && (next == '\'' || next == '"'):
+			note("\"$" + string(next) + "\" quotes by rules this check does not read (in $'...', \\' does not end the string)")
+			keep(character)
+		case character == '$' && next == '{':
+			note("\"${\" expands a parameter, and zsh's (e) flag runs what it holds")
+			keep(character)
+		case character == '(':
+			note("\"(\" starts a subshell, a process substitution or a zsh glob qualifier, which can run another command")
+			keep(character)
 		case character == '\'' || character == '"':
 			quote, inWord = character, true
 		case character == '\\':
@@ -409,9 +505,11 @@ func readForTripwire(command string) shellRead {
 		case character == '&':
 			note("\"&\" starts another command or a background job")
 		case character == '>':
-			if next == '&' && index+2 < len(command) && isDigit(command[index+2]) {
-				index += 2
-				continue
+			if next == '&' {
+				if end := mergeTargetEnd(command, index+2); end > 0 {
+					index = end - 1
+					continue
+				}
 			}
 			note("\">\" writes a file")
 		case character == '<':
@@ -432,6 +530,24 @@ func readForTripwire(command string) shellRead {
 		}
 	}
 	return read
+}
+
+// mergeTargetEnd returns the index just past a descriptor merge's target starting at start ("1" in
+// ">&1", "-" in ">&-"), or 0 when what follows ">&" is not a whole descriptor: a word such as
+// "1/../CLAUDE.md" or "file" makes ">&" a redirection of stdout and stderr to that file.
+func mergeTargetEnd(command string, start int) int {
+	end := start
+	if end < len(command) && command[end] == '-' {
+		end++
+	} else {
+		for end < len(command) && isDigit(command[end]) {
+			end++
+		}
+	}
+	if end == start || end < len(command) && strings.IndexByte(" \t\r\n|;&<>)", command[end]) < 0 {
+		return 0
+	}
+	return end
 }
 
 // isDigit reports whether character is an ASCII digit.

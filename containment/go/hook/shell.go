@@ -275,25 +275,40 @@ func isPWD(text string) bool {
 	return text == "$PWD" || text == "${PWD}"
 }
 
-// directoryInRepository returns "" when path is this repository or a directory inside it: codex's
-// workspace-write sandbox lets it write there, and it runs outside every other sandbox.
+// directoryInRepository returns "" when path is this repository or a directory inside it, and not
+// .git, a protected tree or a directory inside one: codex's workspace-write sandbox lets it write
+// there, and it runs outside every other sandbox. Codex keeps a writable root's own .git read-only,
+// so "--add-dir .git" or "--add-dir .claude/hooks" made a protected directory a root of its own,
+// with nothing read-only below it (security review of PR 9, 2026-11-03). Both readings of the path
+// are held to this (writeReadings).
 func directoryInRepository(path string, cwd string, config Config) string {
-	if !filepath.IsAbs(path) {
-		if !filepath.IsAbs(cwd) {
-			return "it is relative and the session has no working directory"
-		}
-		path = filepath.Join(cwd, path)
-	}
-	canonical, err := canonicalPath(filepath.Clean(path))
-	if err != nil {
-		return err.Error()
+	readings, why := writeReadings(path, cwd)
+	if why != "" {
+		return why
 	}
 	root, err := canonicalPath(config.Root)
 	if err != nil {
 		return "the repository root cannot be resolved"
 	}
-	if !underPath(canonical, root) {
-		return "codex's own sandbox writes where it is pointed, and it is pointed inside " + config.Root + ", nowhere else"
+	held := append(ProtectedTreePaths(config), filepath.Join(config.Root, ".git"))
+	for _, reading := range readings {
+		canonical, err := canonicalPath(reading)
+		if err != nil {
+			return err.Error()
+		}
+		if !underPath(canonical, root) {
+			return "codex's own sandbox writes where it is pointed, and it is pointed inside " + config.Root + ", nowhere else"
+		}
+		for _, directory := range held {
+			inner, err := canonicalPath(directory)
+			if err != nil {
+				return directory + " cannot be resolved (" + err.Error() + "), so no directory can be checked against it"
+			}
+			if underPath(canonical, inner) {
+				return "codex would write " + directory + " as a root of its own, where its sandbox keeps nothing read-only; " +
+					"point it at the repository or another directory in it"
+			}
+		}
 	}
 	return ""
 }
@@ -343,25 +358,25 @@ func inTemporaryDirectory(text string) bool {
 // outputInRepository returns "" when path is a file codex may write: inside the repository (codex
 // runs outside every sandbox, so nothing else holds it to one) and not a protected file.
 func outputInRepository(path string, cwd string, config Config) string {
-	if !filepath.IsAbs(path) {
-		if !filepath.IsAbs(cwd) {
-			return "it is relative and the session has no working directory"
-		}
-		path = filepath.Join(cwd, path)
+	readings, why := writeReadings(path, cwd)
+	if why != "" {
+		return why
 	}
 	if why := ProtectedTarget(path, cwd, config); why != "" {
 		return why
-	}
-	canonical, err := canonicalPath(filepath.Clean(path))
-	if err != nil {
-		return err.Error()
 	}
 	root, err := canonicalPath(config.Root)
 	if err != nil {
 		return "the repository root cannot be resolved"
 	}
-	if !underPath(canonical, root) {
-		return "a program the sandbox does not hold writes its output inside " + config.Root + ", nowhere else"
+	for _, reading := range readings {
+		canonical, err := canonicalPath(reading)
+		if err != nil {
+			return err.Error()
+		}
+		if !underPath(canonical, root) {
+			return "a program the sandbox does not hold writes its output inside " + config.Root + ", nowhere else"
+		}
 	}
 	return ""
 }

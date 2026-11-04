@@ -208,7 +208,8 @@ command naming one of your other excluded programs
 (`xcrun`, `xcodebuild`, `codesign`, `security`, `system_profiler`, `codex exec`, `copilot -p` never with `--allow-all*` or `--yolo`)
 passes only as that one command, heredoc and redirections allowed, no `#` comment, nothing chained; a command
 whose text names a protected file passes only as a pure read (no `; & > < $(` backquote, newline
-or `tee`, every `|` segment a reading program), a spelling-based tripwire that an excluded
+or `tee` outside quotes, no word starting with `#`, no `$'`, `$"`, `${` or unquoted `(`, every `|`
+segment a reading program), a spelling-based tripwire that an excluded
 program run alone skips, so codex prompts may name those files; edits of the
 protected files (`gate.ProtectedFiles` and `~/.claude/settings.json`) are refused from any
 session. The Bash rules apply to sessions in, inside or above this repository. Anything it

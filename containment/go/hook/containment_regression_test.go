@@ -142,6 +142,108 @@ func TestContainmentRegression(t *testing.T) {
 	})
 }
 
+// TestSecurityReviewPR9 covers the security review of PR 9 (2026-11-03): shell constructs the
+// tripwire's reader read as quoted text while the shell ran them, a symbolic link resolved after
+// the ".." that follows it, a codex root made of a protected directory, a hard link into a
+// protected tree, and a Cursor event carrying a model. Each unsafe case has an admitted control of
+// the same shape. Event data only; no shell runs.
+func TestSecurityReviewPR9(t *testing.T) {
+	t.Run("TripwireReader", func(t *testing.T) {
+		config := fakeTree(t)
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"comment_quote", "cat /tmp/p #'\ncp /tmp/p .claude/hooks/owner-inbox.sh #'", true},
+			{"ansi_c_quote", `cat /tmp/p $'\'' > CLAUDE.md '\'`, true},
+			{"locale_quote", `cat /tmp/p $"x" > CLAUDE.md`, true},
+			{"merge_to_path", "cat /tmp/p >&1/../CLAUDE.md", true},
+			{"merge_to_file", "cat /tmp/p >& CLAUDE.md", true},
+			{"zsh_process_substitution", "cat =(cp /tmp/p CLAUDE.md)", true},
+			{"zsh_glob_qualifier", "cat *(e:'cp /tmp/p CLAUDE.md':)", true},
+			{"zsh_eval_flag", `cat "${(e)X}" CLAUDE.md`, true},
+			{"merge_control", "cat CLAUDE.md 2>&1 | head -40", false},
+			{"merge_stderr_control", "cat CLAUDE.md >&2", false},
+			{"close_control", "cat CLAUDE.md 2>&-", false},
+			{"quoted_hash_control", "grep -n '#include' CLAUDE.md", false},
+			{"inner_hash_control", "grep -c x#y CLAUDE.md", false},
+			{"quoted_paren_control", "grep -n 'a(b' CLAUDE.md", false},
+			{"quoted_dollar_control", `grep -n '$x' CLAUDE.md`, false},
+		})
+	})
+
+	t.Run("LinkThenParent", func(t *testing.T) {
+		config := fakeTree(t)
+		writeTree(t, config.Root, []string{"containment/go/hook/hook.go", "docs/x.md"})
+		if err := os.Symlink(filepath.Join(config.Root, "containment/go/hook"), filepath.Join(config.Root, "x")); err != nil {
+			t.Fatal(err)
+		}
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"output_through_link", "codex exec -s read-only -o x/../hook/p_test.go -", true},
+			{"redirect_through_link", "codex exec -s read-only - > x/../hook/q_test.go", true},
+			{"add_dir_through_link", "codex exec -s workspace-write --add-dir x/.. -", true},
+			{"output_control", "codex exec -s read-only -o docs/r.md -", false},
+			{"output_parent_control", "codex exec -s read-only -o docs/../r.md -", false},
+		})
+		for _, tool := range []string{"Edit", "Write", "apply_patch"} {
+			t.Run(tool, func(t *testing.T) {
+				// Spelled by hand: filepath.Join would clean the ".." away before the hook saw it.
+				checkEditDecision(t, config, tool, config.Root+"/x/../hook/p_test.go", true)
+				checkEditDecision(t, config, tool, filepath.Join(config.Root, "docs/new.md"), false)
+			})
+		}
+	})
+
+	t.Run("CodexRoots", func(t *testing.T) {
+		config := fakeTree(t)
+		writeTree(t, config.Root, []string{"containment/go/go.mod", ".claude/hooks/owner-inbox.sh", ".git/HEAD", "docs/x.md"})
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"add_dir_git", "codex exec -s workspace-write --add-dir .git -", true},
+			{"add_dir_git_hooks", "codex exec -s workspace-write --add-dir .git/hooks -", true},
+			{"add_dir_claude_hooks", "codex exec -s workspace-write --add-dir .claude/hooks -", true},
+			{"cd_tree_double_slash", "codex exec -s workspace-write -C containment//go -", true},
+			{"cd_tree_case", "codex exec -s workspace-write -C Containment/Go -", true},
+			{"add_dir_control", "codex exec -s workspace-write --add-dir docs -", false},
+			{"cd_root_control", "codex exec -s workspace-write -C " + config.Root + " -", false},
+		})
+	})
+
+	t.Run("HardLink", func(t *testing.T) {
+		config := fakeTree(t)
+		// A file in the tree that gate.ProtectedFiles does not list, so only the link rule can catch it.
+		writeTree(t, config.Root, []string{"containment/go/hook/unlisted_test.go", "docs/x.md"})
+		if err := os.Link(filepath.Join(config.Root, "containment/go/hook/unlisted_test.go"), filepath.Join(config.Root, "docs/linked.go")); err != nil {
+			t.Fatal(err)
+		}
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"output_hard_link", "codex exec -s read-only -o docs/linked.go -", true},
+			{"redirect_hard_link", "codex exec -s read-only - > docs/linked.go", true},
+			{"output_single_name_control", "codex exec -s read-only -o docs/x.md -", false},
+		})
+		for _, tool := range []string{"Edit", "Write", "apply_patch"} {
+			t.Run(tool, func(t *testing.T) {
+				checkEditDecision(t, config, tool, filepath.Join(config.Root, "docs/linked.go"), true)
+				checkEditDecision(t, config, tool, filepath.Join(config.Root, "docs/x.md"), false)
+			})
+		}
+	})
+
+	t.Run("CursorWithModel", func(t *testing.T) {
+		config := fakeTree(t)
+		cases := []struct {
+			name   string
+			event  map[string]any
+			refuse bool
+		}{
+			{"native_event", map[string]any{"hook_event_name": "beforeShellExecution", "command": "ls", "cwd": config.Root, "model": "gpt-6.1-sol"}, true},
+			{"shell_tool", map[string]any{"hook_event_name": "preToolUse", "tool_name": "Shell", "tool_input": map[string]any{"command": "ls"}, "cwd": config.Root, "model": "gpt-6.1-sol"}, true},
+			{"codex_control", map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": map[string]any{"command": "ls"}, "cwd": config.Root, "model": "gpt-6.1-sol"}, false},
+		}
+		for _, test := range cases {
+			t.Run(test.name, func(t *testing.T) {
+				checkDecision(t, test.name, Decide(marshal(t, test.event), config.Root, config), test.refuse)
+			})
+		}
+	})
+}
+
 type commandDecisionCase struct {
 	name    string
 	command string

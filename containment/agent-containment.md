@@ -144,7 +144,18 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
   matched as a word and not inside `steering`, and a tree's path counts only where it is this
   repository's (a path into another checkout is not). Before 2026-10-31, 438 of 849 recorded
   refusals were pure reads caught by substring matching, and agents learned to spell the name
-  another way to get past it, which is worse than the read (F5 of the 2026-10-27 review).
+  another way to get past it, which is worse than the read (F5 of the 2026-10-27 review). What
+  the reader does not model it refuses (security review of PR 9, 2026-11-03): a word starting with
+  `#` (a comment, so a quote after it is none and the next line runs), `$'` and `$"`, `${` (zsh's
+  `(e)` flag runs what it holds), an unquoted `(` (subshell, `=(...)`, zsh glob qualifier
+  `*(e:...:)`), and `>&WORD` unless WORD is a descriptor or `-` (`>&1/../CLAUDE.md` writes a file).
+  It stays a tripwire: `cp x CLAUDE.m?` spells no name and passes, which is why it is not the lock.
+- **How a write path is read:** twice, and either reading refuses. Once with `.` and `..` removed
+  by name, once as the kernel opens it, a link resolved before the `..` after it: with
+  `x -> containment/go/hook`, `x/../hook/p_test.go` is `containment/go/hook/p_test.go` to the
+  kernel and `hook/p_test.go` by name. An existing file with more than one name (a hard link) is
+  refused, since writing it writes every name it has. This holds for the edit tools,
+  `apply_patch`, codex's `-o`, `-C` and `--add-dir`, and an excluded program's redirections.
 - **Changing one:** show the owner the change, or write a complete file under the scratchpad window
   directory the owner opens in their editor (point 5 below). Never a diff.
 
@@ -158,7 +169,7 @@ Only Claude Code sends `dangerouslyDisableSandbox`, so the flag cannot be the wh
 |---|---|---|
 | Claude Code | `transcript_path`, the sandbox flag | the flag decides; the model comes from the transcript |
 | Codex | `model`, no flag | Codex applies its own `-s` sandbox to its tools; sandboxed rules |
-| Cursor, anything else | neither | **the sandbox-off rules apply, as if the flag were true** |
+| Cursor (`beforeShellExecution`, or the `Shell` tool name), anything else | whatever it carries; for anything else, neither | **the sandbox-off rules apply, as if the flag were true** |
 
 An unsandboxed shell is what a harness that says nothing has, so it is treated as one and gets the
 launcher form or nothing (fail closed, 2026-10-27 review §2). No Cursor hook is registered on this
@@ -286,7 +297,9 @@ decides it per call (`containment/go/hook/elevated.go`). The ids and the dates a
     `codexConfigKeys` (so never `sandbox_mode=danger-full-access`; `--enable`/`--disable` are
     `-c features.NAME` and refused), `-o`/`--output-last-message` writes only a path inside the
     repository that is not protected, and `-C`/`--cd` and `--add-dir`, which workspace-write lets it
-    write, stay inside the repository. Options are read as clap reads them (`-sVALUE`, `-s=VALUE`,
+    write, stay inside the repository and out of `.git` and the protected trees: codex keeps only a
+    writable root's own `.git` read-only, so `--add-dir .git` or `--add-dir .claude/hooks` made one
+    a root with nothing read-only in it. Options are read as clap reads them (`-sVALUE`, `-s=VALUE`,
     `-hsVALUE`, `--sandbox=VALUE`), and an option not in codex exec 0.160.0's `--help` is refused.
     Before `--`, every word must be literal (no `$`, `~`, glob or braces): `$HOME/.zshrc` is not
     the path codex is handed, and an unquoted `$X` can split into options (R1, R2). The one

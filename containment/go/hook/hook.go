@@ -36,7 +36,8 @@ type Config struct {
 
 // event is the part of the PreToolUse event the rules read. Codex sends the model; Claude Code
 // sends the transcript and, for a subagent's call, its agent id (SessionModel). Cursor's native
-// beforeShellExecution event sends neither, and its command at the top level, not in tool_input.
+// beforeShellExecution event sends its command at the top level, not in tool_input, and is never
+// read as sandboxed, whatever else it carries (unsandboxedHarness).
 type event struct {
 	HookEventName  string          `json:"hook_event_name"`
 	ToolName       string          `json:"tool_name"`
@@ -288,11 +289,15 @@ func resolvedPaths(word string, bases []string, config Config) ([]string, string
 }
 
 // unsandboxedHarness reports whether the event comes from a harness that sends no sandbox flag and
-// applies no sandbox of its own: neither Claude Code's transcript_path nor Codex's model. Codex
-// sends the model and applies its own -s sandbox to its tools; Cursor's shell has nothing, so its
-// calls are decided as if the sandbox were off (fail closed, 2026-10-27 review §2).
+// applies no sandbox of its own: Cursor's (its native beforeShellExecution event, or the Shell tool
+// name the cursor-agent CLI sends), or one that sends neither Claude Code's transcript_path nor
+// Codex's model. Codex sends the model and applies its own -s sandbox to its tools; Cursor's shell
+// has nothing, so its calls are decided as if the sandbox were off (fail closed, 2026-10-27 review
+// §2). Cursor is named, not inferred from missing fields: its hook input may carry a model, which
+// made its unsandboxed shell read as Codex's (security review of PR 9, 2026-11-03).
 func unsandboxedHarness(call event) bool {
-	return call.TranscriptPath == "" && call.Model == ""
+	return call.HookEventName == "beforeShellExecution" || call.ToolName == "Shell" ||
+		call.TranscriptPath == "" && call.Model == ""
 }
 
 // decideInRepository applies the rules that hold for a session in, inside or above the repository,
