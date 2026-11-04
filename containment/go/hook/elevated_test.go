@@ -112,9 +112,45 @@ func sessionEvent(t *testing.T, command string, cwd string, transcript string, a
 	return marshal(t, event)
 }
 
+// systemPath gives a test the system's PATH, so a bare name resolves where the hook's rule expects
+// it. The tests used to inherit the PATH of whoever ran them. The owner's ps, pgrep and pkill are
+// pstool (machine-load), linked in ~/.local/bin ahead of /bin so tools inside the agent sandbox
+// can see processes; they stay. Inside the sandbox the hook passes Bash and they are used. With the
+// sandbox off the elevated rule wants the system binary, not one in a user-writable directory, so
+// a bare ps there resolves to the shim and is refused with "spell it /bin/ps". That refusal failed
+// these tests, and so the install's controls (2026-11-03). TestHookShadowedProgram is the control
+// that the refusal itself still holds.
+func systemPath(t *testing.T) {
+	t.Helper()
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+}
+
+// TestHookShadowedProgram: a bare ps that resolves to a shim earlier on PATH is refused, naming the
+// path to spell; the same command spelled /bin/ps, and a bare ps on the system's PATH, are admitted.
+func TestHookShadowedProgram(t *testing.T) {
+	config := fakeTree(t)
+	opus := writeTranscript(t, config, "opus.jsonl", assistant("claude-opus-5-5"))
+	shims := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shims, "ps"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ path, command, reason string }{
+		{shims + ":/usr/bin:/bin", "ps aux", "resolves to " + filepath.Join(shims, "ps") + ", not /bin/ps; spell it /bin/ps"},
+		{shims + ":/usr/bin:/bin", "/bin/ps aux", ""},
+		{"/usr/bin:/bin", "ps aux", ""},
+	} {
+		t.Setenv("PATH", test.path)
+		why := Decide(sessionEvent(t, test.command, config.Root, opus, "", ""), config.Root, config)
+		if test.reason == "" && why != "" || test.reason != "" && !strings.Contains(why, test.reason) {
+			t.Errorf("PATH %s, %q: wanted %q, got %q", test.path, test.command, test.reason, why)
+		}
+	}
+}
+
 // TestHookElevatedModel: the model is read from the harness's record, never from text a model wrote,
 // and only the owner's list is elevated. Controls: the same commands from a limited session refuse.
 func TestHookElevatedModel(t *testing.T) {
+	systemPath(t)
 	config := fakeTree(t)
 	opus := writeTranscript(t, config, "opus.jsonl",
 		assistant("claude-opus-5-5"),
@@ -241,6 +277,7 @@ type fakeProcess struct{ program, directory string }
 // repository and working in it is one, as is z3 working in it; the same program working elsewhere,
 // /bin/sleep and an agent session working in it are not.
 func TestHookElevatedForm(t *testing.T) {
+	systemPath(t)
 	config := fakeTree(t)
 	opus := writeTranscript(t, config, "opus.jsonl", assistant("claude-opus-5-5"))
 	sleeper := filepath.Join(config.Root, "testbin", "d1sleeper")

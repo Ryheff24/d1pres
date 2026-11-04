@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -74,13 +75,80 @@ func run(t *testing.T, stdout *os.File, files []*os.File, arguments ...string) (
 	}
 	command.Stderr = &output
 	command.ExtraFiles = files
+	bound(command)
 	err := command.Run()
+	endGroup(command)
 	t.Logf("%q\n%s", arguments, output.String())
+	if ctx.Err() != nil {
+		t.Fatalf("%q did not finish in 20 s: its process group was killed", arguments)
+	}
 	var exit *exec.ExitError
-	if err != nil && !errors.As(err, &exit) {
+	// ErrWaitDelay: the command exited and a child it left held the output past WaitDelay (bound);
+	// the exit status is the command's own, and endGroup has ended the child.
+	if err != nil && !errors.As(err, &exit) && !errors.Is(err, exec.ErrWaitDelay) {
 		t.Fatalf("could not run %q: %v", arguments, err)
 	}
 	return output.String(), command.ProcessState.ExitCode()
+}
+
+// bound makes a command run() starts end, with everything it started, so a test fails instead of
+// hanging the suite: it runs in a process group of its own, the context's cancel kills that whole
+// group, and Wait stops waiting for the output pipes WaitDelay after the context ends or the
+// command exits. Without it a descendant that outlives the command keeps the pipe open and Wait
+// never returns: on 2026-11-03 TestBuiltGateStacks hung install.sh for good, d1-recomp --help
+// waiting under `d1 job run` for a game lease the Mac's free memory could not grant, and the 20 s
+// kill reaching d1-recomp but not its child. TestRunEndsItsGroup is the control. (runProbe, in
+// harness_test.go, keeps its own 5 s timeout without this; that file is root-bound for d1 containment pr.)
+func bound(command *exec.Cmd) {
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
+	command.WaitDelay = 5 * time.Second
+}
+
+// endGroup kills whatever is left of a bounded command's process group once it has been waited
+// for: nothing the suite runs is meant to outlive its own call.
+func endGroup(command *exec.Cmd) {
+	if command.Process != nil {
+		syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	}
+}
+
+// TestRunEndsItsGroup is bound's control. A command that exits at once but leaves
+// a child holding its output, and a command whose time runs out while its child runs, each return
+// within seconds, and the child is gone after. Without bound, both wait the child's 60 s and fail.
+func TestRunEndsItsGroup(t *testing.T) {
+	started := time.Now()
+	output, status := run(t, nil, nil, "/bin/sh", "-c", "/bin/sleep 60 & echo $!")
+	requireEnded(t, "a child left holding the output", started, output, status == 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	started = time.Now()
+	var printed bytes.Buffer
+	command := exec.CommandContext(ctx, "/bin/sh", "-c", "/bin/sleep 60 & echo $!; wait")
+	command.Stdout = &printed
+	bound(command)
+	err := command.Run()
+	endGroup(command)
+	requireEnded(t, "a timed-out command with a child", started, printed.String(), err != nil && ctx.Err() != nil)
+}
+
+// requireEnded checks one TestRunEndsItsGroup case: it returned in time, as expected, and the child
+// whose PID it printed no longer exists.
+func requireEnded(t *testing.T, name string, started time.Time, printed string, expected bool) {
+	t.Helper()
+	if elapsed := time.Since(started); elapsed > 15*time.Second || !expected {
+		t.Fatalf("%s: returned after %v (expected: %v)", name, elapsed, expected)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(printed))
+	if err != nil {
+		t.Fatalf("%s: printed %q, not the child's PID", name, printed)
+	}
+	for deadline := time.Now().Add(2 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: the child %d outlived the call", name, pid)
+		}
+	}
 }
 
 // proveUnder runs the launcher's prove step under policy text, as the launcher itself does.
