@@ -467,6 +467,48 @@ func TestSecondReviewPR9(t *testing.T) {
 		}
 	})
 
+	// The Codex app makes its worktrees at ~/.codex/worktrees/NAME/<repository directory name> and
+	// keeps its thread there, so check FAILed one nobody could move (2026-11-04). That place is a
+	// worktree place: denied to Claude Code's tools by pattern, refused by the hook once registered,
+	// accepted by git worktree add, and passed by check; a different directory name there is not.
+	t.Run("CodexAppWorktree", func(t *testing.T) {
+		config := fakeTree(t)
+		repository := filepath.Base(config.Root)
+		app := filepath.Join(config.Home, ".codex", "worktrees", "topic", repository)
+		other := filepath.Join(config.Home, ".codex", "worktrees", "topic", "other")
+		writeTree(t, "/", []string{app + "/CLAUDE.md", app + "/notes.md", other + "/CLAUDE.md"})
+		for name, worktree := range map[string]string{"topic": app, "other": other} {
+			gitdir := filepath.Join(config.Root, ".git", "worktrees", name, "gitdir")
+			writeTree(t, config.Root, []string{filepath.Join(".git", "worktrees", name, "gitdir")})
+			if err := os.WriteFile(gitdir, []byte(worktree+"/.git\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		checkEditDecision(t, config, "Edit", app+"/CLAUDE.md", true)
+		checkEditDecision(t, config, "Edit", app+"/notes.md", false)
+		if want := "Edit(/" + app[:len(app)-len("topic/"+repository)] + "*/" + repository + "/CLAUDE.md)"; !slices.Contains(denyRules(config), want) {
+			t.Errorf("deny rules lack %s", want)
+		}
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"add_app_control", "git worktree add " + filepath.Join(config.Home, ".codex", "worktrees", "new", repository), false},
+			{"add_app_other_name", "git worktree add " + filepath.Join(config.Home, ".codex", "worktrees", "new", "other"), true},
+		})
+		var failed, passed []string
+		for _, line := range checkWorktrees(config) {
+			if line.OK {
+				passed = append(passed, line.Text)
+			} else {
+				failed = append(failed, line.Text)
+			}
+		}
+		if len(passed) != 1 || !strings.Contains(passed[0], app) {
+			t.Errorf("check must pass the Codex app's worktree %s: %q", app, passed)
+		}
+		if len(failed) != 1 || !strings.Contains(failed[0], other) {
+			t.Errorf("check must FAIL %s, which is not named after the repository (the control): %q", other, failed)
+		}
+	})
+
 	// Finding 7: options were read without their values, and quotes hid the subcommand.
 	t.Run("TestOptions", func(t *testing.T) {
 		config := fakeTree(t)
