@@ -126,40 +126,83 @@ sudo install -d -o root -g wheel -m 0755 /etc/codex
 sudo install -o root -g wheel -m 0644 "$build/requirements.toml" "$requirements"
 test -x "$codex" || { echo "FAIL codex: $codex is missing, so profile d1 is unmeasured"; exit 2; }
 
-echo "== codex control (profile d1 under the installed requirements: runs/ writable, every protected path refused)"
-# Each probe opens the path for appending and writes nothing, so an existing file's bytes are never
-# changed even if the profile fails. A refusal counts only when the shell says "Operation not
-# permitted": a path that is missing, or a Codex that cannot apply the policy, is not a refusal.
-codex_write() { "$codex" sandbox macos -P d1 --include-managed-config -C "$root" -- /bin/sh -c 'mkdir -p "${1%/*}" && : >> "$1"' probe "$1" 2>&1; }
-mkdir -p "$root/runs"
-positive="$root/runs/.codex-control-$$"
-codex_write "$positive" > /dev/null || { echo "FAIL codex control: profile d1 could not write $positive, so the refusals below prove nothing"; exit 2; }
-rm -f "$positive"
-echo "OK   codex control: profile d1 writes runs/"
+echo "== codex control (profile d1 under the installed requirements: what it must write, then every protected path refused)"
+# Each probe opens a path for appending and writes nothing, so an existing file's bytes are never
+# changed even if the profile fails. A refusal counts only when the output says "Operation not
+# permitted": a missing path, or a Codex that cannot apply the policy, is not a refusal. A probe
+# removes only what it created: an entry that was there before, a dangling link included, is left
+# (GPT 6.1 sol final review of PR 9, finding 9), and a directory it made is removed only if empty.
+codex_in() { local workspace=$1; shift; "$codex" sandbox macos -P d1 --include-managed-config -C "$workspace" -- "$@" 2>&1; }
 codex_failed=0
-for name in CLAUDE.md containment/install.sh .cargo/config.toml containment/go/.codex-probe containment/c/.codex-probe .claude/hooks/.codex-probe .git/hooks/.codex-probe; do
-  path="$root/$name"
-  existed=no
-  [ -e "$path" ] && existed=yes
-  if out=$(codex_write "$path"); then
-    echo "FAIL codex: profile d1 opened $name for writing"
-    codex_failed=1
-  else
-    case "$out" in
-      *"Operation not permitted"*) echo "OK   codex: profile d1 refuses writing $name" ;;
-      *) echo "FAIL codex: writing $name failed without a sandbox refusal: $out"; codex_failed=1 ;;
-    esac
+# probe WORKSPACE PATH LABEL EXPECT: EXPECT is "write" (a control: it must succeed) or "refuse".
+probe() {
+  local workspace=$1 path=$2 label=$3 expect=$4 out status=0 existed=no missing="" dir
+  if [ -e "$path" ] || [ -L "$path" ]; then existed=yes; fi
+  dir=${path%/*}
+  while [ ! -e "$dir" ] && [ ! -L "$dir" ]; do missing+="$dir"$'\n'; dir=${dir%/*}; done
+  out=$(codex_in "$workspace" /bin/sh -c 'mkdir -p "${1%/*}" && : >> "$1"' probe "$path") || status=$?
+  if [ "$existed" = no ] && [ -f "$path" ] && [ ! -L "$path" ]; then rm -f "$path"; fi
+  while IFS= read -r dir; do [ -n "$dir" ] && rmdir "$dir" 2>/dev/null || true; done <<< "$missing"
+  if [ "$expect" = write ]; then
+    if [ "$status" = 0 ]; then echo "OK   codex control: profile d1 writes $label"; return 0; fi
+    echo "FAIL codex control: profile d1 could not write $label, so the refusals below prove nothing: $out"; exit 2
   fi
-  if [ "$existed" = no ]; then rm -f "$path"; fi
+  if [ "$status" = 0 ]; then echo "FAIL codex: profile d1 opened $label for writing"; codex_failed=1
+  else case "$out" in
+    *"Operation not permitted"*) echo "OK   codex: profile d1 refuses writing $label" ;;
+    *) echo "FAIL codex: writing $label failed without a sandbox refusal: $out"; codex_failed=1 ;;
+  esac; fi
+}
+mkdir -p "$root/runs"
+probe "$root" "$root/runs/.codex-control-$$" "runs/" write
+for name in CLAUDE.md containment/install.sh .cargo/config.toml containment/go/.codex-probe containment/c/.codex-probe .claude/hooks/.codex-probe .git/hooks/.codex-probe; do
+  probe "$root" "$root/$name" "$name" refuse
 done
+
+# Worktrees (finding 5): the profile's glob keys, measured on two worktree directories made here,
+# with Codex started in the repository (the worktree is a directory in its workspace) and started in
+# the worktree (the worktree is its workspace root, which the d1 hook does not cover).
+lower="$root/runs/wt-codex-probe-$$"
+upper="$root/runs/WT-codex-probe-$$"
+mkdir "$lower" "$upper"
+mkdir -p "$lower/containment/go"
+: > "$lower/CLAUDE.md"
+: > "$upper/CLAUDE.md"
+probe "$lower" "$lower/notes.txt" "a worktree, as its root" write
+probe "$root" "$lower/CLAUDE.md" "runs/wt-*/CLAUDE.md" refuse
+probe "$root" "$upper/CLAUDE.md" "runs/WT-*/CLAUDE.md" refuse
+probe "$root" "$lower/containment/go/.codex-probe" "runs/wt-*/containment/go/" refuse
+probe "$lower" "$lower/CLAUDE.md" "CLAUDE.md of a worktree that is the workspace root" refuse
+probe "$lower" "$lower/containment/go/.codex-probe" "containment/go/ of a worktree that is the workspace root" refuse
+rm -rf "$lower" "$upper"
+
+# Hard links (finding 8). A link to an unprotected file is the control; then a link to CLAUDE.md is
+# either refused, or made and refused when opened for writing. A link that opens for writing stops
+# the install. Only the names made here are removed; never a byte is written through one.
+source_file="$root/runs/.codex-link-source-$$"
+control_link="$root/runs/.codex-link-control-$$"
 link="$root/runs/.codex-link-$$"
-if "$codex" sandbox macos -P d1 --include-managed-config -C "$root" -- /bin/ln "$root/CLAUDE.md" "$link" > /dev/null 2>&1; then
-  echo "OPEN codex: profile d1 can hard-link CLAUDE.md into runs/, and a write through the link changes CLAUDE.md (known; agent-containment.md, Codex)"
-  rm -f "$link"
+: > "$source_file"
+if codex_in "$root" /bin/ln "$source_file" "$control_link" > /dev/null; then control=made; else control=refused; fi
+rm -f "$control_link" "$source_file"
+status=0
+out=$(codex_in "$root" /bin/ln "$root/CLAUDE.md" "$link") || status=$?
+if [ "$status" != 0 ]; then
+  case "$out" in
+    *"Operation not permitted"*) echo "OK   codex: profile d1 refuses hard-linking CLAUDE.md (a link to an unprotected file is $control)" ;;
+    *) echo "FAIL codex: hard-linking CLAUDE.md failed without a sandbox refusal: $out"; codex_failed=1 ;;
+  esac
 else
-  echo "OK   codex: profile d1 refuses hard-linking a protected file"
+  status=0
+  out=$(codex_in "$root" /bin/sh -c ': >> "$1"' probe "$link") || status=$?
+  rm -f "$link"
+  case "$status:$out" in
+    0:*) echo "FAIL codex: under profile d1 a hard link to CLAUDE.md made in runs/ opens for writing, so a write through it changes CLAUDE.md"; codex_failed=1 ;;
+    *"Operation not permitted"*) echo "OK   codex: profile d1 makes a hard link to CLAUDE.md but refuses opening it for writing" ;;
+    *) echo "FAIL codex: opening a hard link to CLAUDE.md failed without a sandbox refusal: $out"; codex_failed=1 ;;
+  esac
 fi
-test "$codex_failed" = 0 || { echo "FAIL codex: a protected path is writable under profile d1"; exit 2; }
+test "$codex_failed" = 0 || { echo "FAIL codex: a protected path is writable under profile d1, or a probe could not tell"; exit 2; }
 
 echo "== check (every line must say OK; the hook takes effect in new Claude Code sessions)"
 "$install_dir/d1-agent-hook" check

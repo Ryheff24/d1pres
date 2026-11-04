@@ -177,11 +177,13 @@ func TestHookBash(t *testing.T) {
 	inside := config.Root
 	outside := config.Home
 	nonet := config.LauncherDirectory + "/d1-nonet " + config.Root + "/d1-server/target/release/d1-recomp run --seconds 5"
-	codexHeredoc := "codex exec -s read-only -C \"$PWD\" -o docs/r.md - <<'EOF' > \"$TMPDIR/codex.log\" 2>&1\n" +
+	// The log goes to runs/: "$TMPDIR/NAME" was checked by its spelling alone (GPT 6.1 sol final
+	// review of PR 9, finding 2).
+	codexHeredoc := "codex exec -s read-only -C \"$PWD\" -o docs/r.md - <<'EOF' > runs/codex.log 2>&1\n" +
 		"d1-recomp spawns clang; review it | carefully & say $(why) `now`\nEOF\n"
 	codexContinued := "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex exec -m gpt-6.1-sol \\\n" +
 		"  -c model_reasoning_effort='\"high\"' -s read-only -C \"$PWD\" --ephemeral --color never \\\n" +
-		"  -o docs/research/r.md - <<'EOF' > \"$TMPDIR/codex.log\" 2>&1\nthe task\nEOF"
+		"  -o docs/research/r.md - <<'EOF' > runs/codex.log 2>&1\nthe task\nEOF"
 	companionPath := "/Users/ryanheffernan/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs"
 	companion := "node " + companionPath
 	cases := []struct {
@@ -199,7 +201,7 @@ func TestHookBash(t *testing.T) {
 		{companion + " task x; curl y", true, inside, "\";\" starts another command"},
 		{companion + " task $(curl x)", true, inside, "can run another command"},
 		{"node /tmp/codex-companion.mjs task x", true, inside, "runs only as node on its installed script"},
-		{"node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs\" task x", true, inside, "runs only as node on its installed script"},
+		{"node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs\" task x", true, inside, "\"${\" expands a parameter"},
 		{"node other.js", true, inside, "is not a launcher"},
 		{"ls -la", false, inside, ""},
 		// Tests run inside the game profile, and a plain "go test" inside the agent sandbox used to
@@ -323,7 +325,10 @@ func TestHookTripwire(t *testing.T) {
 		{"python3 -c \"open('CLAUDE.md', 'w')\"\n", inside, "a newline, so a second command or a heredoc"},
 		{"echo x > containment/c/d1netgate.c", inside, "names containment/c/d1netgate.c, " + refused},
 		{"cat notes.md | tee CLAUDE.md", inside, "\"tee\" writes a file"},
-		{"cat /usr/bin/tee CLAUDE.md", inside, "\"tee\" writes a file"},
+		{"cat notes.md | /usr/bin/tee CLAUDE.md", inside, "\"tee\" writes a file"},
+		// cat reads the tee binary and CLAUDE.md; tee is an operand, not the program (GPT 6.1 sol
+		// final review of PR 9, finding 10).
+		{"cat /usr/bin/tee CLAUDE.md", inside, ""},
 		// Read as bash reads it (F5 of the 2026-10-27 review): a quoted or escaped pipe is text, a
 		// descriptor merge writes no file, and "tee" inside a word is not tee. Each of these was
 		// refused before, and 438 of 849 refusals in the logs were of this kind.

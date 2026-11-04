@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode"
@@ -307,7 +308,7 @@ func unsandboxedHarness(call event) bool {
 // sandbox-off rules are next.
 func decideInRepository(call event, command string, code string, config Config) (string, bool) {
 	if isCompanion(code) {
-		return CompanionForm(command), true
+		return CompanionForm(command, call.Cwd, config), true
 	}
 	if RoutesToProfiler(code) {
 		if why := ProfilerForm(command, config.Root); why != "" {
@@ -356,6 +357,37 @@ func decideSandboxOff(call event, command string, config Config) string {
 	return ElevatedForm(command, call.Cwd, config)
 }
 
+// onlyBuilds reports whether a go or cargo test command's arguments only build the tests. For go
+// it is the value -c ends with: go reads a boolean flag as many times as it is given and the last
+// one counts, so "go test -c -c=false ./..." runs the tests; finding a "-c" anywhere admitted it
+// (GPT 6.1 sol final review of PR 9, finding 7). Arguments after -args go to the test binary. A -c
+// value that is not a boolean, or a -c spelled any other way, does not count as building only.
+func onlyBuilds(program string, arguments []string) bool {
+	if program == "cargo" {
+		return slices.Contains(arguments, "--no-run")
+	}
+	builds := false
+	for _, argument := range arguments {
+		if argument == "-args" || argument == "--args" {
+			break
+		}
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(argument, "-"), "=")
+		if !strings.HasPrefix(argument, "-") || name != "c" && name != "-c" {
+			continue
+		}
+		if !hasValue {
+			builds = true
+			continue
+		}
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return false
+		}
+		builds = parsed
+	}
+	return builds
+}
+
 // runsTestsInSandbox returns "" unless command would run tests in the agent's own sandbox, where
 // loopback is open and egress goes through the proxy: "go test" or "cargo test" (bench, nextest and
 // cargo's t alias included) without the option that only builds them. Every test runs inside the
@@ -363,15 +395,13 @@ func decideSandboxOff(call event, command string, config Config) string {
 // left the common case -- a plain "go test ./..." inside the sandbox -- passing (audit N7). The
 // lock is the gate compiled into each test binary; this is the rule enforced where it is broken.
 func runsTestsInSandbox(command string, config Config) string {
-	builds := map[string]string{"go": "-c", "cargo": "--no-run"}
 	for _, segment := range commandSegments(command) {
 		words := commandWords(strings.Fields(segment))
 		if len(words) == 0 {
 			continue
 		}
 		program := filepath.Base(words[0])
-		only, known := builds[program]
-		if !known || !slices.ContainsFunc(words[1:], isTestSubcommand) || slices.Contains(words[1:], only) {
+		if program != "go" && program != "cargo" || !slices.ContainsFunc(words[1:], isTestSubcommand) || onlyBuilds(program, words[1:]) {
 			continue
 		}
 		return program + " " + strings.Join(words[1:], " ") + " would run tests inside the agent sandbox, where loopback is open; " +

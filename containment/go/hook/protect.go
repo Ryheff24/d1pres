@@ -522,11 +522,12 @@ func readForTripwire(command string) shellRead {
 		note("an unclosed quote, so what bash would run cannot be told")
 	}
 	endSegment()
+	// tee writes a file when it is the program a segment runs. As an operand it is a word: "grep -n
+	// tee CLAUDE.md" was refused (GPT 6.1 sol final review of PR 9, finding 10). A segment that runs
+	// tee behind another program (xargs tee) is not a reader, so readsOnly refuses it.
 	for _, segment := range read.segments {
-		for _, candidate := range segment {
-			if filepath.Base(candidate) == "tee" {
-				note("\"tee\" writes a file")
-			}
+		if len(segment) > 0 && filepath.Base(segment[0]) == "tee" {
+			note("\"tee\" writes a file")
 		}
 	}
 	return read

@@ -103,7 +103,7 @@ func TestContainmentRegression(t *testing.T) {
 		config := fakeTree(t)
 		outside := filepath.Join(config.Home, "result.md")
 		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
-			{"owner_codex_pattern_control", "codex exec -m gpt-6.1-sol -c model_reasoning_effort='\"high\"' -s read-only -C \"$PWD\" --color never -o docs/r.md - <<'EOF' > \"$TMPDIR/codex.log\" 2>&1\ntask\nEOF", false},
+			{"owner_codex_pattern_control", "codex exec -m gpt-6.1-sol -c model_reasoning_effort='\"high\"' -s read-only -C \"$PWD\" --color never -o docs/r.md - <<'EOF' > runs/codex.log 2>&1\ntask\nEOF", false},
 			{"clustered_sandbox", "codex exec -hsdanger-full-access -", true},
 			{"equals_sandbox", "codex exec -s=danger-full-access -", true},
 			{"long_equals_sandbox", "codex exec --sandbox=danger-full-access -", true},
@@ -241,6 +241,96 @@ func TestSecurityReviewPR9(t *testing.T) {
 				checkDecision(t, test.name, Decide(marshal(t, test.event), config.Root, config), test.refuse)
 			})
 		}
+	})
+}
+
+// TestFinalReviewPR9 covers GPT 6.1 sol's final review of PR 9 (2026-11-03,
+// containment/reviews/REVIEW-gpt-6.1-sol-pr9-final-2026-11-03.md), findings 1, 2, 3, 7 and 10
+// (5 is TestCodexRequirements; 6, 8 and 9 are install.sh and update.sh). Each unsafe case has an
+// admitted control of the same shape. Event data only; no shell runs.
+func TestFinalReviewPR9(t *testing.T) {
+	companion := "node /Users/ryanheffernan/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs"
+
+	// Finding 1: the plugin's route returned before the tripwire and read no redirection.
+	t.Run("CompanionRedirect", func(t *testing.T) {
+		config := fakeTree(t)
+		writeTree(t, config.Root, []string{"docs/x.md"})
+		for _, sandboxOff := range []bool{true, false} {
+			t.Run(map[bool]string{true: "sandbox_off", false: "sandboxed"}[sandboxOff], func(t *testing.T) {
+				checkCommandDecisions(t, config, config.Root, sandboxOff, []commandDecisionCase{
+					{"truncate_protected", companion + " status > CLAUDE.md", true},
+					{"append_protected_tree", companion + " status >> containment/go/hook/x_test.go", true},
+					{"outside_repository", companion + " status > $HOME/.zshrc", true},
+					{"temporary_spelling", companion + " status > \"$TMPDIR/x\"", true},
+					{"null_control", companion + " status > /dev/null 2>&1", false},
+					{"inside_control", companion + " result x > docs/review.md", false},
+					{"prompt_names_files_control", companion + " task 'review CLAUDE.md (and its hooks) for ${bugs} > here'", false},
+				})
+			})
+		}
+	})
+
+	// Finding 2: "$TMPDIR/NAME" was admitted by its spelling, so a link planted there wrote through.
+	t.Run("TemporaryOutput", func(t *testing.T) {
+		config := fakeTree(t)
+		writeTree(t, config.Root, []string{"runs/keep"})
+		if err := os.Symlink(filepath.Join(config.Root, "CLAUDE.md"), filepath.Join(config.Root, "runs/planted")); err != nil {
+			t.Fatal(err)
+		}
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"temporary_name", "xcodebuild -version > $TMPDIR/x", true},
+			{"temporary_quoted", "xcodebuild -version > \"$TMPDIR/codex.log\" 2>&1", true},
+			{"temporary_braced", "xcodebuild -version > ${TMPDIR}/x", true},
+			{"planted_link_in_runs", "xcodebuild -version > runs/planted", true},
+			{"runs_log_control", "xcodebuild -version > runs/x.log 2>&1", false},
+		})
+	})
+
+	// Finding 3: the excluded programs' parser let zsh run =(...) and other forms the tripwire's
+	// reader refuses, because the reader ran only when a protected name was spelled.
+	t.Run("ExcludedGrammar", func(t *testing.T) {
+		config := fakeTree(t)
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"zsh_process_substitution", "xcodebuild -version =(cp runs/p CLAUDE.m?)", true},
+			{"subshell", "xcodebuild -version (cp runs/p x)", true},
+			{"zsh_glob_qualifier", "xcodebuild -version *(e:'cp runs/p x':)", true},
+			{"zsh_eval_flag", "codex exec -s read-only \"${(e)X}\" -", true},
+			{"braced_unquoted", "xcodebuild -version ${X}", true},
+			{"ansi_c_quote", "xcodebuild -version $'\\x2d'", true},
+			{"locale_quote", "xcodebuild -version $\"x\"", true},
+			{"companion_substitution", companion + " task =(cp runs/p CLAUDE.m?)", true},
+			{"quoted_paren_control", "xcodebuild -version 'a(b' \"c(d\"", false},
+			{"braced_pwd_control", "codex exec -s read-only -C \"${PWD}\" -", false},
+			{"plain_pwd_control", "codex exec -s read-only -C \"$PWD\" -", false},
+		})
+	})
+
+	// Finding 7: "-c" anywhere counted as building only, though go reads the last -c.
+	t.Run("GoTestFlag", func(t *testing.T) {
+		config := fakeTree(t)
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"c_then_false", "go test -c -c=false ./...", true},
+			{"false_alone", "go test -c=false ./...", true},
+			{"double_dash_false", "go test -c --c=false ./...", true},
+			{"not_boolean", "go test -c=maybe ./...", true},
+			{"c_control", "go test -c -o testbin/ ./...", false},
+			{"true_control", "go test -c=true -o testbin/ ./...", false},
+			{"false_then_c_control", "go test --c=0 -c ./...", false},
+			{"args_control", "go test -c ./... -args -c=false", false},
+		})
+	})
+
+	// Finding 10: tee as an operand of a reader is a word, not a program.
+	t.Run("TeeOperand", func(t *testing.T) {
+		config := fakeTree(t)
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"tee_program", "cat CLAUDE.md | tee x", true},
+			{"tee_first", "tee CLAUDE.md < x", true},
+			{"tee_by_path", "cat CLAUDE.md | /usr/bin/tee x", true},
+			{"tee_behind_xargs", "echo x | xargs tee CLAUDE.md", true},
+			{"grep_tee_control", "grep -n tee CLAUDE.md", false},
+			{"grep_tee_path_control", "grep -rn /usr/bin/tee containment/go", false},
+		})
 	})
 }
 

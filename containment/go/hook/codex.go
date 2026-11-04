@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"d1preservation/netguard/gate"
 )
 
 // CodexRequirementsPath is where Codex reads managed requirements on macOS and Linux (/etc is a
@@ -54,7 +56,7 @@ func CodexRequirements(config Config) (string, error) {
 	add("extends = %q", ":workspace")
 	add("")
 	add("[permissions.%s.filesystem]", CodexProfile)
-	for _, path := range append(ProtectedPaths(config), ProtectedTreePaths(config)...) {
+	for _, path := range append(append(ProtectedPaths(config), ProtectedTreePaths(config)...), codexWorktreePaths(config)...) {
 		key, err := tomlKey(path)
 		if err != nil {
 			return "", err
@@ -62,6 +64,35 @@ func CodexRequirements(config Config) (string, error) {
 		add("%s = %q", key, "read")
 	}
 	return strings.Join(lines, "\n") + "\n", nil
+}
+
+// codexWorktreePatterns are the worktree directories (worktreeRoots) as Codex glob patterns. The
+// volume ignores case and a glob does not, so "wt-" is listed in each of its four spellings; a
+// worktree's directory exists before anything is written in it, so its own spelling is what the
+// sandbox compares.
+var codexWorktreePatterns = []string{".claude/worktrees/*", "runs/wt-*", "runs/wT-*", "runs/Wt-*", "runs/WT-*"}
+
+// codexWorktreePaths are the protected files and trees inside every worktree, as glob keys: each
+// file, each tree and each tree's "**". The profile kept only the main checkout's copies, so
+// "cp runs/p runs/wt-demo/CLAUDE.m?" was a write Codex allowed and only the spelling-based tripwire
+// stood against (GPT 6.1 sol final review of PR 9, finding 5). They are per-file, not the whole
+// worktree directory, because a Codex session started inside a worktree has that worktree as its
+// workspace root, which is more specific than its parent directory and would win; and the d1 hook
+// does not run there at all, since Codex trusts d1preservation/.codex/hooks.json by its path. Read
+// and write globs are supported on macOS (developers.openai.com/codex/permissions); install.sh
+// measures one, as the parent and as the root.
+func codexWorktreePaths(config Config) []string {
+	var paths []string
+	for _, pattern := range codexWorktreePatterns {
+		base := filepath.Join(config.Root, pattern)
+		for _, name := range gate.ProtectedFiles {
+			paths = append(paths, filepath.Join(base, name))
+		}
+		for _, tree := range gate.ProtectedTrees {
+			paths = append(paths, filepath.Join(base, tree), filepath.Join(base, tree, "**"))
+		}
+	}
+	return paths
 }
 
 // tomlKey is path as a TOML quoted key. A path with a quote, a backslash or a control character is

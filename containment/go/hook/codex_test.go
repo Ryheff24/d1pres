@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"d1preservation/netguard/gate"
 )
 
 // TestCodexRequirements: the requirements make d1 the default, allow only :read-only and d1, extend
@@ -29,6 +31,18 @@ func TestCodexRequirements(t *testing.T) {
 		if !strings.Contains(text, "\n\""+path+"\" = \"read\"\n") {
 			t.Errorf("the requirements do not keep %s read-only", path)
 		}
+	}
+	// Finding 5 of the final review: every worktree's copies, in each spelling of "wt-".
+	for _, want := range []string{
+		config.Root + "/runs/wt-*/CLAUDE.md", config.Root + "/runs/WT-*/CLAUDE.md", config.Root + "/runs/Wt-*/containment/go/**",
+		config.Root + "/.claude/worktrees/*/containment/go", config.Root + "/.claude/worktrees/*/.claude/hooks/**",
+	} {
+		if !strings.Contains(text, "\n\""+want+"\" = \"read\"\n") {
+			t.Errorf("the requirements do not keep %s read-only", want)
+		}
+	}
+	if worktrees := codexWorktreePaths(config); len(worktrees) != len(codexWorktreePatterns)*(len(gate.ProtectedFiles)+2*len(gate.ProtectedTrees)) {
+		t.Errorf("%d worktree paths", len(worktrees))
 	}
 	for _, refused := range []string{"danger", "\":workspace\" = true", "= \"write\"", "= \"deny\""} {
 		if strings.Contains(text, refused) {
