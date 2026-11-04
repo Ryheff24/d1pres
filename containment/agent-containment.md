@@ -176,7 +176,8 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
     with the file already installed, so no Codex session could start until the next install. A
     `deny` glob refuses reading too, and a worktree's build reads `containment/c/d1netgate.c`.
     `tomlKey` now refuses any glob but a final `/**`, and `TestCodexRequirements` checks every key.
-  - `install.sh` measures it with `codex sandbox macos -P d1 --include-managed-config`, each probe
+  - `install.sh` measures it with `codex sandbox -P d1 --include-managed-config` (Codex 0.160 has
+    no `macos` subcommand; ~~`codex sandbox macos`~~ ran `macos` as the command), each probe
     opening a path for appending and writing no bytes, a refusal counting only as "Operation not
     permitted": the control (`runs/` writable), then `CLAUDE.md`, `containment/install.sh`, the
     absent `.cargo/config.toml` and a new file in each tree. A probe removes
