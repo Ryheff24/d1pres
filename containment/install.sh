@@ -231,26 +231,9 @@ for name in CLAUDE.md containment/install.sh .cargo/config.toml containment/go/.
   probe "$root" "$root" "$name" "$name" refuse
 done
 
-# Worktrees (finding 5): the profile's glob keys, measured on two worktree directories made here,
-# with Codex started in the repository (the worktree is a directory in its workspace) and started in
-# the worktree (the worktree is its workspace root, which the d1 hook does not cover). The files the
-# probes aim at are made first, under noclobber, so neither a planted file nor a planted link is
-# truncated or followed into an existing file.
-lower=$(mktemp -d "$root/runs/wt-codex-probe.XXXXXX")
-upper=$(mktemp -d "$root/runs/WT-codex-probe.XXXXXX")
-if ! ( set -C; mkdir "$lower/containment" "$lower/containment/go" && : > "$lower/CLAUDE.md" && : > "$upper/CLAUDE.md" ); then
-  rm -rf "$lower" "$upper"
-  echo "FAIL codex control: the worktree probe directories changed while they were being made"; exit 2
-fi
-probe "$root" "$lower" control.txt "runs/wt-*/, a directory in the repository" write
-probe "$root" "$upper" control.txt "runs/WT-*/, a directory in the repository" write
-probe "$lower" "$lower" notes.txt "a worktree, as its root" write
-probe "$root" "$lower" CLAUDE.md "runs/wt-*/CLAUDE.md" refuse
-probe "$root" "$upper" CLAUDE.md "runs/WT-*/CLAUDE.md" refuse
-probe "$root" "$lower" containment/go/.codex-probe "runs/wt-*/containment/go/" refuse
-probe "$lower" "$lower" CLAUDE.md "CLAUDE.md of a worktree that is the workspace root" refuse
-probe "$lower" "$lower" containment/go/.codex-probe "containment/go/ of a worktree that is the workspace root" refuse
-rm -rf "$lower" "$upper"
+# Worktrees are not probed: Codex 0.160 refuses a "read" key with a glob, so the requirements hold
+# no worktree keys, and in Codex a worktree's copies have only the tripwire (hook/codex.go,
+# codexWorktreePatterns; the install of 2026-11-03 stopped here on b37deed's glob keys).
 
 # Hard links (finding 8). In one step under profile d1, inside a directory mktemp made here and
 # checked as the probes are: a file made there and hard-linked there is the control, which must

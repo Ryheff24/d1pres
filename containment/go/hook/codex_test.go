@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"d1preservation/netguard/gate"
 )
 
 // TestCodexRequirements: the requirements make d1 the default, allow only :read-only and d1, extend
@@ -32,17 +30,29 @@ func TestCodexRequirements(t *testing.T) {
 			t.Errorf("the requirements do not keep %s read-only", path)
 		}
 	}
-	// Finding 5 of the final review: every worktree's copies, in each spelling of "wt-".
-	for _, want := range []string{
-		config.Root + "/runs/wt-*/CLAUDE.md", config.Root + "/runs/WT-*/CLAUDE.md", config.Root + "/runs/Wt-*/containment/go/**",
-		config.Root + "/.claude/worktrees/*/containment/go", config.Root + "/.claude/worktrees/*/.claude/hooks/**",
-	} {
-		if !strings.Contains(text, "\n\""+want+"\" = \"read\"\n") {
-			t.Errorf("the requirements do not keep %s read-only", want)
+	// Codex 0.160 refuses the whole file for a "read" key with a glob anywhere but a final /**, and
+	// then no Codex session on this Mac starts (2026-11-03). Every key is literal, or ends in /**.
+	keys := 0
+	for _, line := range strings.Split(text, "\n") {
+		if key, _, found := strings.Cut(line, "\" = \"read\""); found {
+			keys++
+			if strings.ContainsAny(strings.TrimSuffix(strings.TrimPrefix(key, "\""), "/**"), "*?[]{}") {
+				t.Errorf("a glob key Codex refuses: %s", line)
+			}
 		}
 	}
-	if worktrees := codexWorktreePaths(config); len(worktrees) != len(codexWorktreePatterns)*(len(gate.ProtectedFiles)+2*len(gate.ProtectedTrees)) {
-		t.Errorf("%d worktree paths", len(worktrees))
+	if keys != len(paths) {
+		t.Errorf("the glob check saw %d read keys; the protected paths are %d", keys, len(paths))
+	}
+	// tomlKey's own refusal, with its positive controls.
+	for path, accepted := range map[string]bool{
+		config.Root + "/CLAUDE.md": true, config.Root + "/containment/go/**": true,
+		config.Root + "/runs/wt-*/CLAUDE.md": false, config.Root + "/.claude/worktrees/*/containment/go/**": false,
+		config.Root + "/CLAUDE.m?": false, config.Root + "/c[l]aude.md": false, config.Root + "/**/x": false,
+	} {
+		if _, err := tomlKey(path); (err == nil) != accepted {
+			t.Errorf("tomlKey(%q): accepted %v, want %v (%v)", path, err == nil, accepted, err)
+		}
 	}
 	for _, refused := range []string{"danger", "\":workspace\" = true", "= \"write\"", "= \"deny\""} {
 		if strings.Contains(text, refused) {

@@ -167,18 +167,19 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
     `sandbox_mode` is given. **This applies to every Codex session on this Mac**; outside this
     repository `d1` is plain `:workspace`. `~/.codex/config.toml` must carry no `sandbox_mode` or
     `[sandbox_workspace_write]` (the docs say to remove them; `check` reports one).
-  - **Worktrees too** (GPT 6.1 sol final review of PR 9, finding 5): each protected file and tree
-    inside `.claude/worktrees/*` and `runs/wt-*` (in the four spellings of `wt-`, since a glob
-    keeps case and the volume does not) is a glob key set to `read`. Per file, not the whole
-    worktree: a Codex session started inside a worktree has it as its workspace root, which is
-    more specific than any parent rule, and the d1 hook does not run there at all (Codex trusts
-    `d1preservation/.codex/hooks.json` by its path). The docs support read globs on macOS.
+  - **Not worktrees, in Codex.** A worktree's copies (`.claude/worktrees/*`, `runs/wt-*`) have only
+    the tripwire's spelling in Codex; the hook's `worktreeTarget` still refuses Edit and
+    apply_patch there. b37deed gave them `read` glob keys (GPT 6.1 sol final review of PR 9,
+    finding 5), on the docs' word that read globs work on macOS. ~~The docs support read globs on
+    macOS.~~ Codex 0.160 refuses the whole file instead ("only supports `deny` access; use an exact
+    path or trailing `/**`"). The owner's install of 2026-11-03 stopped at the Codex control on it,
+    with the file already installed, so no Codex session could start until the next install. A
+    `deny` glob refuses reading too, and a worktree's build reads `containment/c/d1netgate.c`.
+    `tomlKey` now refuses any glob but a final `/**`, and `TestCodexRequirements` checks every key.
   - `install.sh` measures it with `codex sandbox macos -P d1 --include-managed-config`, each probe
     opening a path for appending and writing no bytes, a refusal counting only as "Operation not
-    permitted": the controls (`runs/` writable, each worktree writable from the repository and as
-    its own root), then `CLAUDE.md`, `containment/install.sh`, the absent `.cargo/config.toml`, a
-    new file in each tree, and in two worktrees it makes (`wt-` and `WT-`) their `CLAUDE.md` and
-    `containment/go`, with Codex started in the repository and in the worktree. A probe removes
+    permitted": the control (`runs/` writable), then `CLAUDE.md`, `containment/install.sh`, the
+    absent `.cargo/config.toml` and a new file in each tree. A probe removes
     only what it created (a dangling link already there stays; finding 9). Hard links (finding 8):
     a link to a file in the install's private directory is the control; a link to `CLAUDE.md` must
     be refused, or made (and then the same file as `CLAUDE.md`) and refused when opened for
@@ -186,7 +187,8 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
     hook prints.
   - **The owner's terminal writes nothing an agent can redirect** (second review of PR 9, findings
     4 and 8). `runs/` must be a plain directory, not a link. Every probe directory is new from
-    `mktemp` (no guessable name); the files the worktree probes aim at are made under noclobber;
+    `mktemp` (no guessable name); the files the worktree probes aimed at (removed with the glob
+    keys) were made under noclobber;
     links and removals inside the repository run under profile `d1` itself; `ln -n` fails on a link
     planted at its name instead of linking into the directory it points to; and the whole of each
     probe directory goes with `rm -rf`, which does not follow links. 65cfb10's probe ran
