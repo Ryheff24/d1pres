@@ -187,8 +187,9 @@ It also writes `/etc/codex/requirements.toml`, root-owned, from `d1-agent-hook c
 kept beside it as `requirements.toml.before-d1-agent-hook.<time>`. **It applies to every Codex
 session on this Mac:** Codex then offers only profile `d1` (`:workspace` with the protected files
 and trees read-only) and `:read-only`, so `--sandbox danger-full-access`, `--yolo` and the full
-access profile are refused in your other projects too. Remove `sandbox_mode` and
-`[sandbox_workspace_write]` from `~/.codex/config.toml` if you add them; `check` reports one. Then
+access profile are refused in your other projects too. It takes `sandbox_mode` and
+`[sandbox_workspace_write]` out of `~/.codex/config.toml` (`d1-agent-hook codex-config`; the
+earlier file is kept as `config.toml.before-d1-agent-hook.<time>`), since `check` refuses them. Then
 it runs Codex's own sandbox on probes: `runs/` writable (the control), then each protected path
 probed refused with "Operation not permitted" in the main checkout, and a hard link to `CLAUDE.md`
 refused or not writable. Worktrees are not covered in Codex: Codex 0.160 refuses a `read` key with
@@ -199,10 +200,11 @@ and so does a `runs/` that is a link. The probes write no bytes and remove only 
 your terminal writes nothing at a path an agent could have planted a link at (second review of
 PR 9, findings 4 and 8), and each probe counts only if the real directories it ran in, which it
 prints, are the ones it was given, so a probe directory swapped for a link while the install runs
-is a FAIL, not a false OK (third review). A new Codex session picks up the file. **Your `~/.codex/config.toml`
-has a `[sandbox_workspace_write]` table** (`writable_roots` for `drdabber/.derived`): `check` FAILs
-on it, and under the allowlist it no longer applies. To keep that root writable, it has to be
-added to profile `d1` in `hook/codex.go`: the allowlist refuses every other profile.
+is a FAIL, not a false OK (third review). A new Codex session picks up the file. Your
+`~/.codex/config.toml` had a `[sandbox_workspace_write]` table (`writable_roots` for
+`drdabber/.derived`), which no longer applied under the allowlist; the install removes it (owner,
+2026-11-04). To keep that root writable, it has to be added to profile `d1` in `hook/codex.go`: the
+allowlist refuses every other profile.
 
 It builds and caches in a directory it makes in your home (`~/.d1-agent-install.*`, removed when it
 ends), not in temporary space or in the repository: both launcher profiles allow writes under

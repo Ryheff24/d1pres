@@ -124,6 +124,9 @@ if [ -f "$requirements" ] && ! cmp -s "$requirements" "$build/requirements.toml"
 fi
 sudo install -d -o root -g wheel -m 0755 /etc/codex
 sudo install -o root -g wheel -m 0644 "$build/requirements.toml" "$requirements"
+# The older sandbox settings in your own config, which the allowlist replaces and check refuses
+# (sandbox_mode, [sandbox_workspace_write]): removed here, the earlier file kept beside it.
+"$install_dir/d1-agent-hook" codex-config
 test -x "$codex" || { echo "FAIL codex: $codex is missing, so profile d1 is unmeasured"; exit 2; }
 
 echo "== codex control (profile d1 under the installed requirements: what it must write, then every protected path refused)"

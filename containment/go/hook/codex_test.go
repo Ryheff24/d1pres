@@ -72,6 +72,62 @@ func TestCodexRequirements(t *testing.T) {
 	}
 }
 
+// TestRemoveLegacySandbox: the install's codex-config takes out every sandbox_mode line and the
+// whole [sandbox_workspace_write] table (a multi-line array in it too), keeps every other byte, keeps
+// the earlier file and its mode, and leaves a file without them alone; check then passes the line.
+func TestRemoveLegacySandbox(t *testing.T) {
+	const others = "model = \"x\"\n\n[apps.a]\nenabled = false\n\n[[skills.config]]\npath = \"/p\"\n\n[projects.\"/Users/o/d1\"]\ntrust_level = \"trusted\"\n"
+	for name, test := range map[string]struct {
+		before, after string
+		removed       int
+	}{
+		"the owner's table": {
+			"model = \"x\"\n\n[sandbox_workspace_write]\nwritable_roots = [\"/Users/o/drdabber/.derived\"]\n\n[apps.a]\nenabled = false\n\n[[skills.config]]\npath = \"/p\"\n\n[projects.\"/Users/o/d1\"]\ntrust_level = \"trusted\"\n",
+			"model = \"x\"\n\n[apps.a]\nenabled = false\n\n[[skills.config]]\npath = \"/p\"\n\n[projects.\"/Users/o/d1\"]\ntrust_level = \"trusted\"\n", 2},
+		"a multi-line array and sandbox_mode": {
+			"sandbox_mode = \"workspace-write\"\n" + others + "[sandbox_workspace_write]\nwritable_roots = [\n  [\"nested\"],\n  \"/a\",\n]\nnetwork_access = true\n",
+			others, 7},
+		"none": {others, others, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, ".codex", "config.toml")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(test.before), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			removed, backup, err := RemoveLegacySandbox(Config{Home: home})
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, _ := os.ReadFile(path)
+			if string(after) != test.after || len(removed) != test.removed {
+				t.Fatalf("removed %q, left:\n%s", removed, after)
+			}
+			if left := legacySandboxLines(string(after)); len(left) > 0 {
+				t.Fatalf("check would still refuse %q", left)
+			}
+			if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+				t.Fatalf("mode %v", info.Mode().Perm())
+			}
+			if test.removed == 0 {
+				if backup != "" {
+					t.Fatal("a file without them was backed up")
+				}
+				return
+			}
+			if kept, _ := os.ReadFile(backup); string(kept) != test.before {
+				t.Fatal("the earlier file is not kept as it was")
+			}
+		})
+	}
+	if removed, _, err := RemoveLegacySandbox(Config{Home: t.TempDir()}); err != nil || removed != nil {
+		t.Fatalf("no config: %q %v", removed, err)
+	}
+}
+
 // TestCheckCodex: the requirements line fails when the file is missing, differs or is not
 // root-owned (a file the test writes never is), and the user-config line fails on each older
 // sandbox setting and passes without one.
