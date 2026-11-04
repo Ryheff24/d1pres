@@ -143,9 +143,12 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
   `runs/wt-x` (review of PR 9, R3). Every worktree git has registered (`.git/worktrees/*/gitdir`)
   counts as well, wherever it is: one at `runs/review` matched no pattern (second review of PR 9,
   finding 6). `git worktree add` and `git worktree move` may only target a spelled-out
-  `runs/wt-NAME` or `.claude/worktrees/NAME` (resolved against `-C` and the session's directory;
-  no expansion, no `..`), the two places the Codex profile and Claude Code's deny rules cover, and
-  `check` FAILs on a registered worktree anywhere else. That rule reads the command's spelling: a
+  `runs/wt-NAME`, `.claude/worktrees/NAME` or the Codex app's own
+  `~/.codex/worktrees/NAME/d1preservation` (resolved against `-C` and the session's directory;
+  no expansion, no `..`), the three places Claude Code's deny rules cover, and `check` FAILs on a
+  registered worktree anywhere else. The Codex app's place counts because the app picks it and
+  keeps its thread there, so moving one out loses the thread (its phase2-coverage worktree, which
+  `check` FAILed on 2026-11-04). That rule reads the command's spelling: a
   script that runs git is not seen, which is what the check is for.
 - **The three places they are enforced:** the hook refuses the edit tools and `apply_patch`
   (`ProtectedTarget`), `local.sb` denies writes to each (and to every directory above one as an

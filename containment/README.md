@@ -221,8 +221,9 @@ spellings of `wt-`, and `.claude/worktrees/*`).
 each binary root-owned, closed to other writes, with their modes; the hook and deny rules in your
 settings; each `sandbox.excludedCommands` entry one the hook knows; `/etc/codex/requirements.toml`
 root-owned and equal to what the hook prints, and `~/.codex/config.toml` without the older sandbox
-settings; each worktree git has registered inside `runs/wt-NAME` or `.claude/worktrees/NAME` (a
-FAIL for one elsewhere: move it with `git worktree move`); each protected file present and each
+settings; each worktree git has registered inside `runs/wt-NAME`, `.claude/worktrees/NAME` or the
+Codex app's `~/.codex/worktrees/NAME/d1preservation` (a FAIL for one elsewhere: move it with
+`git worktree move`); each protected file present and each
 protected tree a directory.
 It is a report, not the boundary. Rebuild and reinstall after any change under `containment/go`.
 Keep the macOS firewall on: for a server bound to 0.0.0.0 under `d1-localonly` it is the only

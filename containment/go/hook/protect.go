@@ -334,13 +334,26 @@ func worktreeCommand(command string, cwd string, config Config) string {
 				filepath.Join(config.Root, "runs", "wt-NAME") + " or " + filepath.Join(config.Root, ".claude", "worktrees", "NAME")
 		}
 		resolved, err := canonicalPath(resolveAgainst(destination, base))
-		if err != nil || !inWorktreePattern(resolved, root) {
+		if err != nil || !inWorktreePattern(resolved, root, canonicalHome(config)) {
 			return "git worktree " + subcommand + " " + destination + ": a worktree goes in " + filepath.Join(config.Root, "runs", "wt-NAME") +
-				" or " + filepath.Join(config.Root, ".claude", "worktrees", "NAME") + ", where its protected copies are kept read-only " +
+				", " + filepath.Join(config.Root, ".claude", "worktrees", "NAME") + " or the Codex app's " +
+				filepath.Join(config.Home, ".codex", "worktrees", "NAME", filepath.Base(config.Root)) + ", where its protected copies are kept read-only " +
 				"(containment/agent-containment.md, Protected files and trees)"
 		}
 	}
 	return ""
+}
+
+// canonicalHome is config.Home resolved, or "" when there is none or it cannot be.
+func canonicalHome(config Config) string {
+	if config.Home == "" {
+		return ""
+	}
+	home, err := canonicalPath(config.Home)
+	if err != nil {
+		return ""
+	}
+	return home
 }
 
 // resolveAgainst is path made absolute against base, uncleaned.
@@ -367,11 +380,32 @@ func RegisteredWorktrees(config Config) []string {
 }
 
 // inWorktreePattern reports whether path, absolute and resolved, is a worktree directory where
-// worktreeRoots puts one: <root>/.claude/worktrees/NAME or <root>/runs/wt-NAME, without case.
-func inWorktreePattern(path string, root string) bool {
+// worktreeRoots puts one, <root>/.claude/worktrees/NAME or <root>/runs/wt-NAME, or where the Codex
+// app does (codexAppWorktree), without case.
+func inWorktreePattern(path string, root string, home string) bool {
 	parent, name := filepath.Dir(path), filepath.Base(path)
 	return strings.EqualFold(parent, filepath.Join(root, ".claude", "worktrees")) ||
-		strings.EqualFold(parent, filepath.Join(root, "runs")) && hasPrefixFold(name, "wt-") && len(name) > 3
+		strings.EqualFold(parent, filepath.Join(root, "runs")) && hasPrefixFold(name, "wt-") && len(name) > 3 ||
+		codexAppWorktree(path, root, home)
+}
+
+// codexAppWorktree reports whether path is where the Codex app makes a worktree of this
+// repository: <home>/.codex/worktrees/NAME/<the repository's directory name>, without case. The
+// Codex app picks that place itself, and moving one out of it loses the app's thread for it (the
+// owner's phase2-coverage, 2026-11-04, which check FAILed). The deny rules cover it as a pattern
+// (codexAppWorktreePattern), and worktreeTarget covers it as a registered worktree.
+func codexAppWorktree(path string, root string, home string) bool {
+	if home == "" {
+		return false
+	}
+	parent := filepath.Dir(path)
+	return strings.EqualFold(filepath.Base(path), filepath.Base(root)) && len(filepath.Base(parent)) > 0 &&
+		strings.EqualFold(filepath.Dir(parent), filepath.Join(home, ".codex", "worktrees"))
+}
+
+// codexAppWorktreePattern is codexAppWorktree's place as a glob, for Claude Code's deny rules.
+func codexAppWorktreePattern(config Config) string {
+	return filepath.Join(config.Home, ".codex", "worktrees", "*", filepath.Base(config.Root))
 }
 
 // canonicalPath is path with its deepest existing part resolved (symbolic links followed) and the

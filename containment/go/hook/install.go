@@ -30,7 +30,8 @@ func Settings(config Config) map[string]any {
 
 // denyRules is one Edit rule per protected path, and one per protected tree, which Claude Code
 // reads as a gitignore-style pattern (so it also denies Bash writes under the tree in the agent's
-// own sandbox). Each worktree pattern (codexWorktreePatterns) gets the same rules, as globs, so a
+// own sandbox). Each worktree pattern (codexWorktreePatterns, and the Codex app's
+// codexAppWorktreePattern) gets the same rules, as globs, so a
 // worktree's CLAUDE.md, gate call sites and containment sources are denied to Claude Code's tools
 // as the main checkout's are (second review of PR 9, finding 6). A worktree outside the patterns is
 // refused at git worktree add and move, and reported by check.
@@ -42,8 +43,14 @@ func denyRules(config Config) []string {
 	for _, path := range ProtectedTreePaths(config) {
 		rules = append(rules, "Edit(/"+path+"/**)")
 	}
+	bases := []string{}
 	for _, pattern := range codexWorktreePatterns {
-		base := filepath.Join(config.Root, pattern)
+		bases = append(bases, filepath.Join(config.Root, pattern))
+	}
+	if config.Home != "" {
+		bases = append(bases, codexAppWorktreePattern(config))
+	}
+	for _, base := range bases {
 		for _, name := range gate.ProtectedFiles {
 			rules = append(rules, "Edit(/"+filepath.Join(base, name)+")")
 		}
@@ -68,10 +75,10 @@ func checkWorktrees(config Config) []Line {
 		if err != nil {
 			continue
 		}
-		inside := inWorktreePattern(resolved, root)
-		text := "worktree: " + worktree + " is inside runs/wt-NAME or .claude/worktrees/NAME, where its protected copies are read-only"
+		inside := inWorktreePattern(resolved, root, canonicalHome(config))
+		text := "worktree: " + worktree + " is inside runs/wt-NAME, .claude/worktrees/NAME or the Codex app's ~/.codex/worktrees/NAME/" + filepath.Base(config.Root) + ", where Claude Code's deny rules keep its protected copies read-only"
 		if !inside {
-			text = "worktree: " + worktree + " is outside runs/wt-NAME and .claude/worktrees/NAME, so Codex's profile and Claude Code's deny rules do not cover its protected copies; move it with git worktree move"
+			text = "worktree: " + worktree + " is outside runs/wt-NAME, .claude/worktrees/NAME and ~/.codex/worktrees/NAME/" + filepath.Base(config.Root) + ", so Claude Code's deny rules do not cover its protected copies; move it with git worktree move"
 		}
 		lines = append(lines, fact(inside, text))
 	}
