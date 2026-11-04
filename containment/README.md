@@ -189,10 +189,12 @@ session on this Mac:** Codex then offers only profile `d1` (`:workspace` with th
 and trees read-only) and `:read-only`, so `--sandbox danger-full-access`, `--yolo` and the full
 access profile are refused in your other projects too. Remove `sandbox_mode` and
 `[sandbox_workspace_write]` from `~/.codex/config.toml` if you add them; `check` reports one. Then
-it runs Codex's own sandbox on probes: `runs/` and each worktree writable (the controls), then
-each protected path probed refused with "Operation not permitted", in the main checkout and in two
-worktrees it makes and removes (`runs/wt-codex-probe.XXXXXX`, `runs/WT-codex-probe.XXXXXX`, named
-by `mktemp`), and a hard link to `CLAUDE.md` refused or not writable. Any FAIL stops the install,
+it runs Codex's own sandbox on probes: `runs/` writable (the control), then each protected path
+probed refused with "Operation not permitted" in the main checkout, and a hard link to `CLAUDE.md`
+refused or not writable. Worktrees are not covered in Codex: Codex 0.160 refuses a `read` key with
+a glob, and the install of 2026-11-03 stopped on exactly that, with the file already in place, so
+no Codex session could start until the next install (`agent-containment.md`, "Not worktrees, in
+Codex"). Any FAIL stops the install,
 and so does a `runs/` that is a link. The probes write no bytes and remove only what they made;
 your terminal writes nothing at a path an agent could have planted a link at (second review of
 PR 9, findings 4 and 8), and each probe counts only if the real directories it ran in, which it
