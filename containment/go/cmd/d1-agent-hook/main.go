@@ -7,7 +7,8 @@
 // (-ldflags "-X main.repositoryRoot=<root>"). No environment variable, flag or file turns it off.
 //
 // The owner's commands, not hook rules: "d1-agent-hook settings" prints the block for
-// ~/.claude/settings.json; "d1-agent-hook check" prints one OK or FAIL line per fact the install
+// ~/.claude/settings.json; "d1-agent-hook codex-requirements" prints /etc/codex/requirements.toml
+// (hook/codex.go); "d1-agent-hook check" prints one OK or FAIL line per fact the install
 // rests on and exits 2 if any fails. check reports; it is not the boundary.
 package main
 
@@ -37,8 +38,11 @@ func main() {
 	if len(arguments) == 1 && arguments[0] == "check" {
 		check(config)
 	}
+	if len(arguments) == 1 && arguments[0] == "codex-requirements" {
+		codexRequirements(config, configError)
+	}
 	if len(arguments) > 0 {
-		block(fmt.Sprintf("unknown arguments %q: the hook takes none (settings and check are the owner's commands)", arguments))
+		block(fmt.Sprintf("unknown arguments %q: the hook takes none (settings, codex-requirements and check are the owner's commands)", arguments))
 	}
 	if configError != nil {
 		block(configError.Error())
@@ -89,6 +93,17 @@ func settings(config hook.Config, configError error) {
 		os.Exit(2)
 	}
 	fmt.Println(string(text))
+	os.Exit(0)
+}
+
+// codexRequirements prints /etc/codex/requirements.toml's text, or why it cannot, and exits.
+func codexRequirements(config hook.Config, configError error) {
+	text, err := hook.CodexRequirements(config)
+	if configError != nil || err != nil {
+		fmt.Fprintln(os.Stderr, gate.OneLine(fmt.Sprintf("d1-agent-hook codex-requirements: %v %v", configError, err)))
+		os.Exit(2)
+	}
+	fmt.Print(text)
 	os.Exit(0)
 }
 

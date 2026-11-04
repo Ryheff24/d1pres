@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"d1preservation/netguard/gate"
 )
@@ -18,6 +19,16 @@ func ProtectedPaths(config Config) []string {
 		paths = append(paths, filepath.Join(config.Root, name))
 	}
 	return append(paths, filepath.Join(config.Home, ".claude", "settings.json"))
+}
+
+// ProtectedTreePaths are the absolute directories whose every file is protected, present or not
+// (gate.ProtectedTrees).
+func ProtectedTreePaths(config Config) []string {
+	var paths []string
+	for _, name := range gate.ProtectedTrees {
+		paths = append(paths, filepath.Join(config.Root, name))
+	}
+	return paths
 }
 
 // decideEdit refuses an edit of a protected file or of the harness's session records, from any
@@ -84,14 +95,80 @@ func decidePatch(input toolInput, cwd string, config Config) string {
 // Paths are compared as the volume stores them: each side is resolved to its deepest part that
 // exists (symbolic links followed), compared by device and inode (so case, links and hard links do
 // not matter; macOS realpath keeps the caller's case), and the names below it without case.
+// Three rules, in order: the named files (gate.ProtectedFiles and ~/.claude/settings.json), the
+// protected trees (gate.ProtectedTrees, which also cover a file nobody has listed yet), and the
+// same two against the repository-relative name a path has inside a worktree, where the gate call
+// sites and the containment sources are copied (audit 2026-10-31, N6).
+//
+// Each rule is applied to two readings of the path, and either one refuses: the path as spelled
+// with "." and ".." removed by name (what a writer that cleans the path first opens), and the path
+// as the kernel opens it (physicalPath: a link resolved before the ".." after it). With a link
+// x -> containment/go/hook, "x/../hook/p_test.go" read by name is <repo>/hook/p_test.go, and the
+// kernel writes containment/go/hook/p_test.go (security review of PR 9, 2026-11-03).
 func ProtectedTarget(path string, cwd string, config Config) string {
+	paths, why := writeReadings(path, cwd)
+	if why != "" {
+		return why
+	}
+	for _, reading := range paths {
+		if why := protectedAt(reading, config); why != "" {
+			return why
+		}
+	}
+	return ""
+}
+
+// writeReadings is path made absolute against cwd, as its two readings: cleaned by name, and as
+// the kernel resolves it (physicalPath). why says why it has none.
+func writeReadings(path string, cwd string) ([]string, string) {
 	if !filepath.IsAbs(path) && !filepath.IsAbs(cwd) {
-		return path + " (a relative path, and no working directory to resolve it)"
+		return nil, path + " (a relative path, and no working directory to resolve it)"
 	}
 	if !filepath.IsAbs(path) {
-		path = filepath.Join(cwd, path)
+		path = cwd + string(filepath.Separator) + path
 	}
-	target, err := locate(filepath.Clean(path))
+	physical, err := physicalPath(path)
+	if err != nil {
+		return nil, err.Error()
+	}
+	return []string{filepath.Clean(path), physical}, ""
+}
+
+// physicalPath is path, absolute and not cleaned, resolved the way the kernel opens it: name by
+// name from the root, a symbolic link replaced by its target where it is met, and ".." taken from
+// the directory reached so far rather than from the spelling (filepath.EvalSymlinks does this when
+// the path is not cleaned first). The names below its deepest existing part are appended as they
+// are; a ".." among them is refused, since the kernel fails there and what it would mean cannot be
+// told.
+func physicalPath(path string) (string, error) {
+	names := strings.Split(path, string(filepath.Separator))
+	for count := len(names); count > 0; count-- {
+		prefix := strings.Join(names[:count], string(filepath.Separator))
+		if prefix == "" {
+			prefix = string(filepath.Separator)
+		}
+		real, err := filepath.EvalSymlinks(prefix)
+		if err != nil {
+			continue
+		}
+		parts := []string{real}
+		for _, name := range names[count:] {
+			switch name {
+			case "", ".":
+				continue
+			case "..":
+				return "", fmt.Errorf("%s steps back out of a directory that does not exist, so where it writes cannot be told", path)
+			}
+			parts = append(parts, name)
+		}
+		return filepath.Join(parts...), nil
+	}
+	return "", fmt.Errorf("no part of %s exists", path)
+}
+
+// protectedAt applies ProtectedTarget's rules to one absolute, cleaned reading of a path.
+func protectedAt(path string, config Config) string {
+	target, err := locate(path)
 	if err != nil {
 		return err.Error()
 	}
@@ -101,11 +178,232 @@ func ProtectedTarget(path string, cwd string, config Config) string {
 			return protected + " cannot be resolved (" + err.Error() + "), so no edit can be checked against it"
 		}
 		if sameLocation(target, candidate) {
-			return protected + " is protected: only the owner edits it, outside agent sessions; show the owner the change " +
-				"instead (containment/agent-containment.md, point 5)"
+			return refusedAs(protected)
+		}
+	}
+	if len(target.missing) == 0 && target.existing.Mode().IsRegular() {
+		// A file with a second name shares its contents with that name, wherever it is: a hard link
+		// made from a file in a protected tree is written through by a path the tree rule does not
+		// see (the named files above are compared by inode, so they are caught already).
+		if status, readable := target.existing.Sys().(*syscall.Stat_t); !readable || status.Nlink > 1 {
+			return path + " is a file with more than one name (a hard link), and writing it changes the file under every " +
+				"name it has, which may be a protected one; write a new file instead"
+		}
+	}
+	canonical, err := canonicalPath(path)
+	if err != nil {
+		return err.Error()
+	}
+	for _, tree := range ProtectedTreePaths(config) {
+		root, err := canonicalPath(tree)
+		if err != nil {
+			return tree + " cannot be resolved (" + err.Error() + "), so no edit can be checked against it"
+		}
+		if underPath(canonical, root) {
+			return refusedAs(tree) + " (every file under it is protected: install.sh builds and tests " +
+				"this tree in the owner's terminal, and git and Claude Code run what is in a hooks directory)"
+		}
+	}
+	return worktreeTarget(canonical, config)
+}
+
+// refusedAs is the refusal for a protected path, with what to do instead.
+func refusedAs(protected string) string {
+	return protected + " is protected: only the owner edits it, outside agent sessions; show the owner the change " +
+		"instead (containment/agent-containment.md, point 5), or stage a complete file under your scratchpad " +
+		"window directory for the owner's editor"
+}
+
+// worktreeRoots are the repository-relative directories that hold worktrees: Claude Code's
+// .claude/worktrees/<name> and d1's runs/wt-<name>. A worktree holds its own copy of the gate call
+// sites and (where one was copied in) of containment/, and a rebuilt gate-less copy can be run bare
+// inside the agent sandbox, where loopback is open.
+var worktreeRoots = []string{".claude/worktrees", "runs"}
+
+// worktreeTarget returns "" unless canonical, an absolute resolved path, is a copy of a protected
+// file or a file in a protected tree inside one of this repository's worktrees, then why it is
+// refused. The worktree's own name is skipped and the rest of the path is read as a
+// repository-relative name. Every comparison is without case, as the volume compares names:
+// "RUNS/wt-demo" and "runs/WT-demo" are runs/wt-demo, and a case-sensitive prefix let both through
+// (review of PR 9, R3).
+func worktreeTarget(canonical string, config Config) string {
+	root, err := canonicalPath(config.Root)
+	if err != nil {
+		return ""
+	}
+	var candidates [][]string
+	for _, parent := range worktreeRoots {
+		prefix := filepath.Join(root, parent) + string(filepath.Separator)
+		if !hasPrefixFold(canonical, prefix) {
+			continue
+		}
+		rest := strings.Split(canonical[len(prefix):], string(filepath.Separator))
+		if len(rest) < 2 || parent == "runs" && !hasPrefixFold(rest[0], "wt-") {
+			continue
+		}
+		candidates = append(candidates, rest)
+	}
+	// Every worktree git has registered counts too, wherever it is (second review of PR 9, finding
+	// 6: a worktree at runs/review matched no pattern).
+	for _, worktree := range RegisteredWorktrees(config) {
+		if real, err := canonicalPath(worktree); err == nil && hasPrefixFold(canonical, real+string(filepath.Separator)) {
+			candidates = append(candidates, append([]string{filepath.Base(real)}, strings.Split(canonical[len(real)+1:], string(filepath.Separator))...))
+		}
+	}
+	for _, rest := range candidates {
+		relative := strings.Join(rest[1:], "/")
+		for _, name := range gate.ProtectedFiles {
+			if strings.EqualFold(relative, name) {
+				return "this is " + name + " in the worktree " + rest[0] + ", and a worktree's copy of a protected file is " +
+					"protected too: the gate call sites and the containment sources are what a worktree copy would drop " +
+					"(containment/agent-containment.md, point 5)"
+			}
+		}
+		for _, tree := range gate.ProtectedTrees {
+			if strings.EqualFold(relative, tree) || hasPrefixFold(relative, tree+"/") {
+				return "this is under " + tree + " in the worktree " + rest[0] + ", and a worktree's copy of a protected " +
+					"tree is protected too (containment/agent-containment.md, point 5)"
+			}
 		}
 	}
 	return ""
+}
+
+// gitGlobalValues are git's global options that take the next word as their value.
+var gitGlobalValues = []string{"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env", "--super-prefix"}
+
+// worktreeAddValues are the options of git worktree add that take the next word as their value.
+var worktreeAddValues = []string{"-b", "-B", "--reason"}
+
+// worktreeCommand returns "" unless command runs git worktree add or move with a destination that
+// is not where worktreeRoots puts a worktree, then why it is refused. The patterns (codex.go's glob
+// keys, the settings' deny rules) cover only <root>/.claude/worktrees/NAME and <root>/runs/wt-NAME,
+// so a worktree anywhere else held its own CLAUDE.md, gate call sites and containment sources with
+// nothing but the tripwire's spelling over them (second review of PR 9, finding 6). A destination
+// with an expansion is refused: where it lands cannot be told. Spelling-based, like the tripwire: a
+// script or alias that runs git is not seen, and check reports a worktree registered elsewhere.
+func worktreeCommand(command string, cwd string, config Config) string {
+	root, err := canonicalPath(config.Root)
+	if err != nil {
+		return ""
+	}
+	for _, segment := range commandSegments(command) {
+		words := commandWords(strings.Fields(segment))
+		if len(words) == 0 || filepath.Base(words[0]) != "git" {
+			continue
+		}
+		base := cwd
+		index := 1
+		for index < len(words) && strings.HasPrefix(words[index], "-") {
+			if slices.Contains(gitGlobalValues, words[index]) && index+1 < len(words) {
+				if words[index] == "-C" {
+					base = resolveAgainst(words[index+1], base)
+				}
+				index++
+			}
+			index++
+		}
+		if index+1 >= len(words) || words[index] != "worktree" || words[index+1] != "add" && words[index+1] != "move" {
+			continue
+		}
+		subcommand := words[index+1]
+		var positional []string
+		for position := index + 2; position < len(words); position++ {
+			word := words[position]
+			if subcommand == "add" && slices.Contains(worktreeAddValues, word) {
+				position++
+				continue
+			}
+			if strings.HasPrefix(word, "-") && word != "-" {
+				continue
+			}
+			positional = append(positional, word)
+		}
+		want := 0
+		if subcommand == "move" {
+			want = 1
+		}
+		if len(positional) <= want {
+			continue
+		}
+		destination := positional[want]
+		// ".." is refused too: canonicalPath cleans it before a link under it is followed, and git
+		// does not, so runs/link/../wt-x would be read as runs/wt-x and made beside the link's target.
+		if strings.ContainsAny(destination, "$~*?[]{}`") || slices.Contains(strings.Split(filepath.ToSlash(destination), "/"), "..") {
+			return "git worktree " + subcommand + " " + destination + ": the destination must be spelled out, as " +
+				filepath.Join(config.Root, "runs", "wt-NAME") + " or " + filepath.Join(config.Root, ".claude", "worktrees", "NAME")
+		}
+		resolved, err := canonicalPath(resolveAgainst(destination, base))
+		if err != nil || !inWorktreePattern(resolved, root) {
+			return "git worktree " + subcommand + " " + destination + ": a worktree goes in " + filepath.Join(config.Root, "runs", "wt-NAME") +
+				" or " + filepath.Join(config.Root, ".claude", "worktrees", "NAME") + ", where its protected copies are kept read-only " +
+				"(containment/agent-containment.md, Protected files and trees)"
+		}
+	}
+	return ""
+}
+
+// resolveAgainst is path made absolute against base, uncleaned.
+func resolveAgainst(path string, base string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return base + string(filepath.Separator) + path
+}
+
+// RegisteredWorktrees are the directories of every worktree git has registered for this
+// repository, read from .git/worktrees/*/gitdir (each holds the path of its worktree's .git file).
+// One git cannot read is left out; worktreeTarget's patterns still hold for it.
+func RegisteredWorktrees(config Config) []string {
+	files, _ := filepath.Glob(filepath.Join(config.Root, ".git", "worktrees", "*", "gitdir"))
+	var worktrees []string
+	for _, file := range files {
+		text, err := os.ReadFile(file)
+		if path := strings.TrimSpace(string(text)); err == nil && filepath.IsAbs(path) {
+			worktrees = append(worktrees, filepath.Dir(path))
+		}
+	}
+	return worktrees
+}
+
+// inWorktreePattern reports whether path, absolute and resolved, is a worktree directory where
+// worktreeRoots puts one: <root>/.claude/worktrees/NAME or <root>/runs/wt-NAME, without case.
+func inWorktreePattern(path string, root string) bool {
+	parent, name := filepath.Dir(path), filepath.Base(path)
+	return strings.EqualFold(parent, filepath.Join(root, ".claude", "worktrees")) ||
+		strings.EqualFold(parent, filepath.Join(root, "runs")) && hasPrefixFold(name, "wt-") && len(name) > 3
+}
+
+// canonicalPath is path with its deepest existing part resolved (symbolic links followed) and the
+// names below it appended, so two spellings of one file are one string.
+func canonicalPath(path string) (string, error) {
+	where, err := locate(path)
+	if err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(existingPath(path, len(where.missing)))
+	if err != nil {
+		return "", fmt.Errorf("%s cannot be resolved (%v)", path, err)
+	}
+	return filepath.Join(append([]string{real}, where.missing...)...), nil
+}
+
+// existingPath is path with its last missing names removed.
+func existingPath(path string, missing int) string {
+	for range missing {
+		path = filepath.Dir(path)
+	}
+	return path
+}
+
+// underPath reports whether path is root or below it, compared without case (the volume folds it).
+func underPath(path string, root string) bool {
+	return strings.EqualFold(path, root) || hasPrefixFold(path, root+string(filepath.Separator))
+}
+
+// hasPrefixFold is strings.HasPrefix without case.
+func hasPrefixFold(text string, prefix string) bool {
+	return len(text) >= len(prefix) && strings.EqualFold(text[:len(prefix)], prefix)
 }
 
 // location is a path as its deepest existing part and the names below it that do not exist yet.
@@ -150,68 +448,289 @@ func sameLocation(first location, second location) bool {
 	return true
 }
 
-// tripwireOperators are the shell text that can write a file or start a second program: the Rust
-// hook's list (archive/d1-netgate-rust/src/hook.rs). A newline counts, so every heredoc does.
-var tripwireOperators = []string{";", "&", ">", "<", "`", "$(", "\n", "tee"}
-
 // readers are the programs that only read; gitReaders and cargoReaders are the read-only
 // subcommands of git and cargo (not clippy: clippy --fix writes sources). The Rust hook's lists.
 var readers = []string{"cat", "head", "tail", "grep", "rg", "wc", "ls", "diff", "stat", "file", "less"}
 var gitReaders = []string{"diff", "log", "show", "status", "blame", "grep", "ls-files"}
 var cargoReaders = []string{"build", "test", "check", "doc", "tree", "metadata"}
 
-// Tripwire returns "" unless command names a protected file and is not a pure read: no
-// tripwireOperators, and every | segment a reader. It is a tripwire, spelling-based: it reads the
-// command's text, so a command that reaches a file without spelling its name passes. The edit
-// rule and the deny rules are what stop writes; this catches the plain spelling of one in Bash.
-func Tripwire(command string) string {
-	name := namedProtectedFile(command)
+// Tripwire returns "" unless command names a protected file or tree and is not a pure read: no
+// operator that writes a file or starts another program, and every "|" segment a reader. It is a
+// tripwire, spelling-based: it reads the command's text, so a command that reaches a file without
+// spelling its name passes. The edit rule and the deny rules are what stop writes; this catches the
+// plain spelling of one in Bash.
+//
+// The command is read as bash reads it (readForTripwire), so quotes, escapes and descriptor merges
+// mean what they mean: a "|" inside a grep alternation is text, a "\|" is text, "2>&1" writes no
+// file, and "tee" is a word, not the letters inside "steering". Before that (F5 of the 2026-10-27
+// review) 438 of 849 refusals in the session logs were pure reads, and agents learned to route
+// around the tripwire by spelling the name another way, which is worse than the read.
+func Tripwire(command string, config Config) string {
+	name := namedProtectedFile(command, config)
 	if name == "" {
 		return ""
 	}
-	why := ""
-	for _, operator := range tripwireOperators {
-		if strings.Contains(command, operator) {
-			why = fmt.Sprintf("it contains %q", operator)
-			break
-		}
-	}
-	for _, segment := range strings.Split(command, "|") {
-		if why == "" && !readsOnly(segment) {
-			why = fmt.Sprintf("%q is not one of the reading programs", strings.TrimSpace(segment))
+	read := readForTripwire(command)
+	why := read.operator
+	if why == "" {
+		for _, segment := range read.segments {
+			if !readsOnly(segment) {
+				why = fmt.Sprintf("%q is not one of the reading programs", strings.Join(segment, " "))
+				break
+			}
 		}
 	}
 	if why == "" {
 		return ""
 	}
-	return "this command names " + name + ", which is protected, and is not a pure read (" + why +
-		"): only the owner edits it, outside agent sessions; show the owner the change instead " +
-		"(containment/agent-containment.md, point 5)"
+	return "this command names " + name + ", which is protected, and is not a pure read (" + why + "). " + howToRead(name)
+}
+
+// howToRead is the allowed form, in the refusal itself: agents that are told only "not allowed"
+// stop or start spelling the name another way (F7 and section 4 of the 2026-10-27 review).
+func howToRead(name string) string {
+	return "To read it: the Read tool, or one of " + strings.Join(readers, ", ") +
+		", git " + strings.Join(gitReaders, "/") + ", cargo " + strings.Join(cargoReaders, "/") +
+		", alone or piped into another of those, with no \";\", \"&\", \"&&\", \">\", \"`\", \"$(\", heredoc or tee, " +
+		"and no word starting with \"#\", \"$'\", \"${\" or unquoted \"(\"" +
+		" (a descriptor merge such as 2>&1 is fine, and a quoted or escaped \"|\" is text). " +
+		"To change it: show the owner the change (containment/agent-containment.md, point 5), or write a complete " +
+		"file under your scratchpad window directory, named so the command does not spell " + name + "."
+}
+
+// shellRead is one Bash command as the tripwire reads it: its "|" segments as words (quotes and
+// escapes removed), and the first operator outside quotes that writes a file or starts another
+// program, as the phrase a refusal uses ("" when there is none).
+type shellRead struct {
+	segments [][]string
+	operator string
+}
+
+// readForTripwire reads command the way bash would: '...' is literal, "..." is literal except for
+// an expansion that runs a command, a backslash makes the next character literal (and a
+// backslash-newline joins lines), ";" "&" "|" ">" "<" backquote and "$(" are operators outside
+// quotes, "N>&N" is a descriptor merge and writes no file, and tee is matched as a word.
+//
+// What it does not model it refuses, because a quote it reads where the shell sees none hides the
+// rest of the line (security review of PR 9, 2026-11-03): a "#" that starts a word (a comment, so a
+// "'" after it opens nothing and the next line runs), "$'" and "$\"" (ANSI-C quoting, where "\'"
+// does not end the string), "${" (zsh's (e) flag runs what the expansion holds), an unquoted "("
+// (a subshell, bash or zsh process substitution "=(...)", or a zsh glob qualifier "*(e:...:)",
+// which runs code), and ">&WORD" when WORD is not all digits or "-" (">&1/../CLAUDE.md" writes the
+// file 1/../CLAUDE.md, stdout and stderr both).
+func readForTripwire(command string) shellRead {
+	var read shellRead
+	var words []string
+	var word strings.Builder
+	inWord := false
+	quote := byte(0)
+	note := func(phrase string) {
+		if read.operator == "" {
+			read.operator = phrase
+		}
+	}
+	endWord := func() {
+		if inWord {
+			words = append(words, word.String())
+			word.Reset()
+			inWord = false
+		}
+	}
+	endSegment := func() {
+		endWord()
+		read.segments = append(read.segments, words)
+		words = nil
+	}
+	keep := func(character byte) {
+		word.WriteByte(character)
+		inWord = true
+	}
+	for index := 0; index < len(command); index++ {
+		character := command[index]
+		next := byte(0)
+		if index+1 < len(command) {
+			next = command[index+1]
+		}
+		switch {
+		case quote == '\'':
+			if character == '\'' {
+				quote = 0
+				continue
+			}
+			keep(character)
+		case quote == '"':
+			switch {
+			case character == '"':
+				quote = 0
+			case character == '`':
+				note("\"`\" runs another command")
+			case character == '$' && next == '(':
+				note("\"$(\" runs another command")
+				index++
+			case character == '$' && next == '{':
+				note("\"${\" expands a parameter, and zsh's (e) flag runs what it holds")
+				keep(character)
+			case character == '\\' && index+1 < len(command):
+				index++
+				keep(command[index])
+			default:
+				keep(character)
+			}
+		case character == '#' && !inWord:
+			note("\"#\" starts a comment, so a quote after it is no quote to the shell and the next line runs")
+			keep(character)
+		case character == '$' && (next == '\'' || next == '"'):
+			note("\"$" + string(next) + "\" quotes by rules this check does not read (in $'...', \\' does not end the string)")
+			keep(character)
+		case character == '$' && next == '{':
+			note("\"${\" expands a parameter, and zsh's (e) flag runs what it holds")
+			keep(character)
+		case character == '(':
+			note("\"(\" starts a subshell, a process substitution or a zsh glob qualifier, which can run another command")
+			keep(character)
+		case character == '\'' || character == '"':
+			quote, inWord = character, true
+		case character == '\\':
+			if next == '\n' {
+				index++
+				continue
+			}
+			if index+1 < len(command) {
+				index++
+				keep(command[index])
+			}
+		case character == ' ' || character == '\t' || character == '\r':
+			endWord()
+		case character == '\n':
+			note("a newline, so a second command or a heredoc")
+			endWord()
+		case character == ';':
+			note("\";\" starts another command")
+			endWord()
+		case character == '`':
+			note("\"`\" runs another command")
+		case character == '$' && next == '(':
+			note("\"$(\" runs another command")
+			index++
+		case character == '|':
+			if next == '|' {
+				note("\"||\" starts another command")
+				index++
+			}
+			endSegment()
+		case character == '&':
+			note("\"&\" starts another command or a background job")
+		case character == '>':
+			if next == '&' {
+				if end := mergeTargetEnd(command, index+2); end > 0 {
+					index = end - 1
+					continue
+				}
+			}
+			note("\">\" writes a file")
+		case character == '<':
+			note("\"<\" reads a file into the command, and \"<<\" starts a heredoc")
+		default:
+			keep(character)
+		}
+	}
+	if quote != 0 {
+		note("an unclosed quote, so what bash would run cannot be told")
+	}
+	endSegment()
+	// tee writes a file when it is the program a segment runs. As an operand it is a word: "grep -n
+	// tee CLAUDE.md" was refused (GPT 6.1 sol final review of PR 9, finding 10). A segment that runs
+	// tee behind another program (xargs tee) is not a reader, so readsOnly refuses it.
+	for _, segment := range read.segments {
+		if len(segment) > 0 && filepath.Base(segment[0]) == "tee" {
+			note("\"tee\" writes a file")
+		}
+	}
+	return read
+}
+
+// mergeTargetEnd returns the index just past a descriptor merge's target starting at start ("1" in
+// ">&1", "-" in ">&-"), or 0 when what follows ">&" is not a whole descriptor: a word such as
+// "1/../CLAUDE.md" or "file" makes ">&" a redirection of stdout and stderr to that file.
+func mergeTargetEnd(command string, start int) int {
+	end := start
+	if end < len(command) && command[end] == '-' {
+		end++
+	} else {
+		for end < len(command) && isDigit(command[end]) {
+			end++
+		}
+	}
+	if end == start || end < len(command) && strings.IndexByte(" \t\r\n|;&<>)", command[end]) < 0 {
+		return 0
+	}
+	return end
+}
+
+// isDigit reports whether character is an ASCII digit.
+func isDigit(character byte) bool {
+	return character >= '0' && character <= '9'
 }
 
 // namedProtectedFile returns the protected file whose spelling (from tripwireSpellings) occurs in
 // command, ignoring case, or "". Of several, the longest spelling wins, so it names the right one.
-func namedProtectedFile(command string) string {
+// A file's spelling counts wherever it occurs, so a staging copy named CLAUDE.md is caught too. A
+// tree's counts only where the text is this repository's tree: at the start of a word, or in a word
+// that starts with the repository root. A tree is spelled as a path (containment/go), and a path
+// like that is a part of every absolute path into another checkout of the same repository, where an
+// agent is meant to work: matching those would refuse ordinary commands, which is the behaviour F5
+// of the 2026-10-27 review is about.
+func namedProtectedFile(command string, config Config) string {
 	lower := strings.ToLower(command)
 	named := ""
 	longest := 0
-	for name, spelling := range tripwireSpellings() {
+	spellings := tripwireSpellings()
+	for _, name := range gate.ProtectedFiles {
+		spelling := spellings[name]
 		if len(spelling) > longest && strings.Contains(lower, strings.ToLower(spelling)) {
 			named = name
 			longest = len(spelling)
 		}
 	}
+	if named != "" {
+		return named
+	}
+	for _, name := range gate.ProtectedTrees {
+		if len(spellings[name]) > longest && namesTree(command, spellings[name], config) {
+			named = name
+			longest = len(spellings[name])
+		}
+	}
 	return named
 }
 
-// tripwireSpellings maps each of gate.ProtectedFiles to the text that names it: its basename,
-// unless another protected file shares it or it is a bare word (no "." or "-", like config), then
-// the shortest trailing path that is neither. So d1-nonet's main.go is spelled d1-nonet/main.go
-// and a Bash edit of another crate's main.go is not refused, while CLAUDE.md, game.sb and
-// settings.json (which also names the owner's ~/.claude/settings.json) match by name alone.
+// namesTree reports whether command spells this repository's tree: a word that is the spelling or
+// starts with it, or a word that starts with the repository root and holds it.
+func namesTree(command string, spelling string, config Config) bool {
+	for _, segment := range commandSegments(command) {
+		for _, word := range strings.Fields(segment) {
+			bare := strings.Trim(word, `'"`)
+			if hasPrefixFold(bare, spelling) || hasPrefixFold(bare, "./"+spelling) {
+				return true
+			}
+			if config.Root != "" && hasPrefixFold(bare, config.Root) &&
+				strings.Contains(strings.ToLower(bare[len(config.Root):]), strings.ToLower("/"+spelling)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// tripwireSpellings maps each of gate.ProtectedFiles and gate.ProtectedTrees to the text that
+// names it: its basename, unless another protected name shares it or it is a bare word (no "." or
+// "-", like config or go), then the shortest trailing path that is neither. So d1-nonet's main.go
+// is spelled d1-nonet/main.go and a Bash edit of another crate's main.go is not refused, while
+// CLAUDE.md, game.sb and settings.json (which also names the owner's ~/.claude/settings.json)
+// match by name alone, and the trees by their path (containment/go, .git/hooks).
 func tripwireSpellings() map[string]string {
 	spellings := map[string]string{}
-	for _, name := range gate.ProtectedFiles {
+	for _, name := range append(slices.Clone(gate.ProtectedFiles), gate.ProtectedTrees...) {
 		parts := strings.Split(name, "/")
 		spelling := name
 		for count := 1; count < len(parts); count++ {
@@ -226,9 +745,9 @@ func tripwireSpellings() map[string]string {
 	return spellings
 }
 
-// sharedSuffix reports whether a protected file other than name ends with suffix.
+// sharedSuffix reports whether a protected file or tree other than name ends with suffix.
 func sharedSuffix(name string, suffix string) bool {
-	for _, other := range gate.ProtectedFiles {
+	for _, other := range append(slices.Clone(gate.ProtectedFiles), gate.ProtectedTrees...) {
 		if other != name && (other == suffix || strings.HasSuffix(other, "/"+suffix)) {
 			return true
 		}
@@ -236,11 +755,11 @@ func sharedSuffix(name string, suffix string) bool {
 	return false
 }
 
-// readsOnly reports whether segment starts a reading program, spelled bare (no path, no NAME=
-// assignment before it, so a planted program or PATH= cannot stand in), with no option that
-// makes it write a file or run a program (--output, --pre, git's -O pager, less's -o log file).
-func readsOnly(segment string) bool {
-	words := strings.Fields(segment)
+// readsOnly reports whether words, one "|" segment as bash would pass it, starts a reading program,
+// spelled bare (no path, no NAME= assignment before it, so a planted program or PATH= cannot stand
+// in), with no option that makes it write a file or run a program (--output, --pre, git's -O pager,
+// less's -o log file).
+func readsOnly(words []string) bool {
 	if len(words) == 0 {
 		return false
 	}

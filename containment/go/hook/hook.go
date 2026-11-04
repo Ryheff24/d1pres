@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode"
@@ -35,16 +36,26 @@ type Config struct {
 }
 
 // event is the part of the PreToolUse event the rules read. Codex sends the model; Claude Code
-// sends the transcript and, for a subagent's call, its agent id (SessionModel).
+// sends the transcript and, for a subagent's call, its agent id (SessionModel). Cursor's native
+// beforeShellExecution event sends its command at the top level, not in tool_input, and is never
+// read as sandboxed, whatever else it carries (unsandboxedHarness).
 type event struct {
 	HookEventName  string          `json:"hook_event_name"`
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
+	Command        *string         `json:"command"`
 	Cwd            string          `json:"cwd"`
 	TranscriptPath string          `json:"transcript_path"`
 	AgentID        string          `json:"agent_id"`
 	Model          string          `json:"model"`
 }
+
+// shellEvents are the event names this hook decides: Claude Code's and Codex's PreToolUse, Cursor's
+// two spellings of it through its Claude-hook import, and Cursor's native shell event. shellTools
+// are the tool names that run a shell: Claude Code and Codex send Bash, the cursor-agent CLI sends
+// Shell.
+var shellEvents = []string{"PreToolUse", "preToolUse", "beforeShellExecution"}
+var shellTools = []string{"Bash", "Shell", "shell"}
 
 // toolInput is the part of a tool's input the rules read; a field of the wrong type refuses.
 type toolInput struct {
@@ -56,48 +67,53 @@ type toolInput struct {
 
 // Decide reads one event and applies the rule for its tool. projectDirectory is
 // CLAUDE_PROJECT_DIR from the hook's environment.
+// The owner's flag on this function (2026-10-27, answered by the 2026-10-31 audit, §1 and N7):
+// the event-name line is right, and the gaps were below it. What was measured and what changed:
+//
+//   - Cursor. Its native event is beforeShellExecution with the command at the top level and no
+//     tool_input, which this hook used to refuse as unreadable, so under that shape every Cursor
+//     shell call was blocked. Both spellings of PreToolUse, beforeShellExecution and a top-level
+//     command are read now, and Shell counts as Bash. No Cursor hook is registered on this Mac
+//     (~/.cursor/hooks.json does not exist), so the path stays unverified by anything but the tests.
+//   - Fail closed on the sandbox flag. Only Claude Code sends dangerouslyDisableSandbox. A harness
+//     that sends neither transcript_path (Claude Code) nor model (Codex) is an unsandboxed shell,
+//     and the sandbox-off rules apply to it as if the flag were true. Codex is covered by its own
+//     -s sandbox, which is why its events are not treated that way.
+//   - "Deny and specify correct use." Every refusal below names the allowed form, not only the doc:
+//     the tripwire prints the reading programs and the staging route (howToRead), a game binary
+//     prints the launcher command with the path filled in, a test prints the build-then-launch pair.
+//   - "Tests included, automatically." A test that runs inside the agent sandbox is refused here
+//     (runsTestsInSandbox), not only when the sandbox is off, so the rule is enforced in code and
+//     not by remembering it. The lock is still the gate compiled into each test binary.
+//
+// What this function cannot answer is in the audit: the test-package control (N7), the server
+// self-gate (F1 of 2026-10-27) and the documentation drift the owner describes are not hook rules.
 func Decide(raw []byte, projectDirectory string, config Config) string {
 	var call event
 	var input toolInput
 	err := json.Unmarshal(raw, &call)
-	if err == nil {
+	if err == nil && len(call.ToolInput) > 0 {
 		err = json.Unmarshal(call.ToolInput, &input)
 	}
 	if err != nil {
 		return "the event is not one this hook can read (" + err.Error() + ")"
 	}
-	if call.HookEventName != "" && call.HookEventName != "PreToolUse" && call.HookEventName != "preToolUse" {
-		// *CRITICAL FLAG FOR MYTHOS*
-		// I added `&& call.HookEventName != "preToolUse"` for cursor here. otherwise it would always error for the agent at least on bash
-		// just double check that this logic, cursor may have more flows same for codex and claude, im assuming this coverage is not good enough
-		// over the last week from agent use, i've really learned common patterns here of how the agents are behaving and some love to miss-behave
-		// first, the containment needs to have better automatic containment it shouldn't be a critical blocker, first off, deny and specify correct
-		// use. thats 90% of the issue, its like "this is not allowed", then the agents have no idea whats not allowed, they just blank hard.
-		// i point them at what i think would be relevant documentation explaining the procedure(agent-containments usually, then 2nd is the
-		// research skill). its not drilled in enough what to not do and what to do. theres a lot of conflicting information and old procedures
-		// that while they are quoted out, cause drift. claude.md for example, or the fact that gpt was read only at first, then i added sandbox access
-		// but the agents.md and claude.md should me symlinks, strip the prior source content from these docs entirely and focus on how shit works
-		// the main issue are agents that aren't smart, they just cannot understand whats occuring,
-		// this needs a larger look though, its extremely easy for claude opus 5.5 to understand and work here because its the most intelligent.
-		// but for literally anyone else, likely half because documentation is written specifically for claude from claude,.
-		// another example, the last mythos reviewer, who was testing the sandbox to make sure it worked, executed 2 tool calls (iirc it was bash)
-		// with failed do to the hook(the test) then could be seen executing a 3rd tool call to i believe update a file that was considered a
-		// locked file, and should've failed the hook. A second example, the original specification was everything ran in containment that ran code in
-		// any way, tests included. but i don't think thats being followed, and its systemic because its not being prevented at the code level,
-		// i keep sharing this pdf with agents from a talk at gdc from i think the lead engineer on the engine for destiny 1, this talk was in 2015
-		// but specifically where it talks about rules of the codebase, enforcement, etc. it all applies here in a different way. Any tool, place, method, etc,
-		// where code is tested or ran in any way, must be in containment, AUTOMATICALLY.
-		return "this hook decides PreToolUse events, and was sent " + call.HookEventName
+	if input.Command == nil {
+		input.Command = call.Command
+	}
+	if call.HookEventName != "" && !slices.Contains(shellEvents, call.HookEventName) {
+		return "this hook decides " + strings.Join(shellEvents, ", ") + " events, and was sent " + call.HookEventName
+	}
+	if slices.Contains(shellTools, call.ToolName) || call.ToolName == "" && call.HookEventName == "beforeShellExecution" {
+		return decideBash(call, input, []string{projectDirectory, call.Cwd}, config)
 	}
 	switch call.ToolName {
-	case "Bash":
-		return decideBash(call, input, []string{projectDirectory, call.Cwd}, config)
 	case "Edit", "Write", "MultiEdit", "NotebookEdit":
 		return decideEdit(call.ToolName, input, call.Cwd, config)
 	case "apply_patch":
 		return decidePatch(input, call.Cwd, config)
 	}
-	return fmt.Sprintf("this hook decides Bash, the edit tools and apply_patch only, and was sent %q", call.ToolName)
+	return fmt.Sprintf("this hook decides %s, the edit tools and apply_patch only, and was sent %q", strings.Join(shellTools, ", "), call.ToolName)
 }
 
 // decideBash: a game binary named without the launcher is refused from any session. In sessions
@@ -116,40 +132,222 @@ func decideBash(call event, input toolInput, directories []string, config Config
 	code := withoutHeredocBody(command)
 	game := firstWordMatching(code, func(word string) bool { return slices.Contains(gate.GameBinaries, filepath.Base(word)) })
 	if game != "" {
-		return game + " runs game code; start it only as the argument of " + config.LauncherDirectory + "/d1-nonet"
+		return game + " runs game code; start it only as the argument of " + config.LauncherDirectory + "/d1-nonet, as one plain command: " +
+			config.LauncherDirectory + "/d1-nonet " + filepath.Join(config.Root, "d1-server/target/release", filepath.Base(game)) +
+			" ARGS --log FILE (absolute paths, optional D1_*=value in front, never D1_NET*, no quotes, pipes, \";\", \"$\" or redirection)"
 	}
-	if !inScope(directories, config.Root) {
-		return ""
+	sandboxOff := input.DangerouslyDisableSandbox != nil && *input.DangerouslyDisableSandbox || unsandboxedHarness(call)
+	because := ""
+	if !inScope(directories, config.Root) && !strings.Contains(code, config.Root) {
+		// A session working elsewhere meets the rules of this repository only when it reaches into
+		// it: that is the whole of F2 and N9 (a sandbox-off "cp x <repo>/CLAUDE.md" from another
+		// project passed), without imposing the launcher form on the owner's other projects, where
+		// this hook is installed too. Reaching is decided on the paths the command spells, resolved
+		// (reachesRepository): "cp x ../repo/CLAUDE.md" and "cd ../repo && go test" reach it as
+		// surely as the absolute root does (review of PR 9, R4).
+		reaches, unknown := reachesRepository(code, directories, config)
+		switch {
+		case reaches:
+		case unknown != "" && sandboxOff:
+			because = "; the rules of " + config.Root + " applied because " + unknown + ", so whether this sandbox-off command " +
+				"reaches it cannot be told: spell the directory out"
+		default:
+			return ""
+		}
 	}
+	why := ""
+	if refused, decided := decideInRepository(call, command, code, config); decided {
+		why = refused
+	} else if sandboxOff {
+		why = decideSandboxOff(call, command, config)
+	}
+	if why != "" {
+		why += because
+	}
+	return why
+}
+
+// reachesRepository reports whether command, run from the session's directories, spells a path
+// inside this repository: any word (or the value after a "NAME=" or "--option=") that resolves
+// there, relative to the session's directories or to a directory a cd or pushd before it moved to,
+// with ~, $HOME and $PWD expanded, compared by file identity (within), so case and links do not
+// matter. A glob counts when this repository is inside the directory it is matched in. unknown says
+// why it cannot be told: a cd or pushd to a directory the hook cannot resolve, or a path built on a
+// variable it cannot expand. A tripwire like the rest: a path the command does not spell (a script
+// that changes directory) is not seen.
+func reachesRepository(command string, directories []string, config Config) (bool, string) {
+	var bases []string
+	for _, directory := range directories {
+		if filepath.IsAbs(directory) {
+			bases = append(bases, directory)
+		}
+	}
+	unknown := ""
+	marked := strings.NewReplacer("$(", " $SUBSTITUTION;", "`", " $SUBSTITUTION;").Replace(command)
+	for _, segment := range commandSegments(marked) {
+		words := strings.Fields(strings.NewReplacer(`"`, "", "'", "").Replace(segment))
+		for _, word := range words {
+			candidates := []string{word}
+			if _, value, found := strings.Cut(word, "="); found {
+				candidates = append(candidates, value)
+			}
+			for _, candidate := range candidates {
+				reaches, why := spellsRepositoryPath(candidate, bases, config)
+				if reaches {
+					return true, ""
+				}
+				if unknown == "" && why != "" && strings.Contains(candidate, "/") {
+					unknown = why
+				}
+			}
+		}
+		program := commandWords(words)
+		if len(program) == 0 || program[0] != "cd" && program[0] != "pushd" {
+			continue
+		}
+		target := config.Home
+		for _, word := range program[1:] {
+			if word != "-P" && word != "-L" {
+				target = word
+				break
+			}
+		}
+		moved, why := resolvedPaths(target, bases, config)
+		if why != "" || target == "-" {
+			if unknown == "" {
+				unknown = "it changes directory to " + target
+			}
+			continue
+		}
+		bases = append(bases, moved...)
+	}
+	return false, unknown
+}
+
+// spellsRepositoryPath reports whether word, resolved against bases, is a path in the repository,
+// or why it cannot be resolved.
+func spellsRepositoryPath(word string, bases []string, config Config) (bool, string) {
+	if word == "" {
+		return false, ""
+	}
+	if glob := strings.IndexAny(word, "*?[{"); glob >= 0 {
+		// The repository is reached if it is inside the directory the glob is matched in.
+		directories, why := resolvedPaths(filepath.Dir(word[:glob]+"x"), bases, config)
+		for _, directory := range directories {
+			if within(directory, config.Root) {
+				return true, ""
+			}
+		}
+		return false, why
+	}
+	paths, why := resolvedPaths(word, bases, config)
+	for _, path := range paths {
+		if within(config.Root, path) {
+			return true, ""
+		}
+	}
+	return false, why
+}
+
+// resolvedPaths is word as absolute paths, one per base when it is relative, with ~, $HOME and $PWD
+// expanded, or why it cannot be resolved (another variable, ~user).
+func resolvedPaths(word string, bases []string, config Config) ([]string, string) {
+	expanded := word
+	for _, home := range []string{"$HOME", "${HOME}"} {
+		if rest, found := strings.CutPrefix(expanded, home); found && (rest == "" || rest[0] == '/') {
+			expanded = config.Home + rest
+		}
+	}
+	if expanded == "~" || strings.HasPrefix(expanded, "~/") {
+		expanded = config.Home + expanded[1:]
+	}
+	if strings.HasPrefix(expanded, "~") {
+		return nil, word + " names another user's home"
+	}
+	if filepath.IsAbs(expanded) {
+		if strings.Contains(expanded, "$") {
+			return nil, word + " is built on a variable the hook cannot expand"
+		}
+		return []string{filepath.Clean(expanded)}, ""
+	}
+	var paths []string
+	for _, base := range bases {
+		path := expanded
+		for _, pwd := range []string{"$PWD", "${PWD}"} {
+			if rest, found := strings.CutPrefix(path, pwd); found && (rest == "" || rest[0] == '/') {
+				path = base + rest
+			}
+		}
+		if strings.Contains(path, "$") {
+			return nil, word + " is built on a variable the hook cannot expand"
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(base, path)
+		}
+		paths = append(paths, filepath.Clean(path))
+	}
+	return paths, ""
+}
+
+// unsandboxedHarness reports whether the event comes from a harness that sends no sandbox flag and
+// applies no sandbox of its own: Cursor's (its native beforeShellExecution event, or the Shell tool
+// name the cursor-agent CLI sends), or one that sends neither Claude Code's transcript_path nor
+// Codex's model. Codex sends the model and applies its own -s sandbox to its tools; Cursor's shell
+// has nothing, so its calls are decided as if the sandbox were off (fail closed, 2026-10-27 review
+// §2). Cursor is named, not inferred from missing fields: its hook input may carry a model, which
+// made its unsandboxed shell read as Codex's (security review of PR 9, 2026-11-03).
+func unsandboxedHarness(call event) bool {
+	return call.HookEventName == "beforeShellExecution" || call.ToolName == "Shell" ||
+		call.TranscriptPath == "" && call.Model == ""
+}
+
+// decideInRepository applies the rules that hold for a session in, inside or above the repository,
+// or whose command spells its root: the Codex plugin, the read-only profilers, the owner's
+// sandbox-excluded programs, the spellings that would drop the Rust test gate, a test run inside
+// the agent sandbox, and the tripwire. decided is false when none of them applies and the
+// sandbox-off rules are next.
+func decideInRepository(call event, command string, code string, config Config) (string, bool) {
 	if isCompanion(code) {
-		return CompanionForm(command)
+		return CompanionForm(command), true
 	}
 	if RoutesToProfiler(code) {
 		if why := ProfilerForm(command, config.Root); why != "" {
-			return why
+			return why, true
 		}
-		return Tripwire(command)
+		return Tripwire(command, config), true
 	}
 	if excluded := firstWordMatching(code, isExcludedName); excluded != "" {
 		if elevated, because := Elevated(call, config); !elevated {
-			return "the owner's settings run " + filepath.Base(excluded) + " outside the sandbox, which only elevated models may do, and " + because + " (containment/agent-containment.md, Access control matrix)"
+			return "the owner's settings run " + filepath.Base(excluded) + " outside the sandbox, which only elevated models may do, and " + because + " (containment/agent-containment.md, Access control matrix)", true
 		}
-		return ExcludedForm(command)
+		return ExcludedForm(command, call.Cwd, config), true
 	}
-	override := overridesTestGate(code)
-	if override != "" {
-		return override + " would build or run a Rust test without the test gate that d1-server/.cargo/config.toml links in; every test runs inside the network sandbox (containment/agent-containment.md, Tests)"
+	if override := overridesTestGate(code); override != "" {
+		return override + " would build or run a Rust test without the test gate that d1-server/.cargo/config.toml links in; every test runs inside the network sandbox (containment/agent-containment.md, Tests)", true
 	}
-	tripped := Tripwire(command)
-	if tripped != "" {
-		return tripped
+	if why := runsTestsInSandbox(code, config); why != "" {
+		return why, true
 	}
-	if input.DangerouslyDisableSandbox == nil || !*input.DangerouslyDisableSandbox {
-		return ""
+	if why := worktreeCommand(code, call.Cwd, config); why != "" {
+		return why, true
 	}
+	if tripped := Tripwire(command, config); tripped != "" {
+		return tripped, true
+	}
+	return "", false
+}
+
+// decideSandboxOff applies the sandbox-off rules: the launcher form, or an elevated tool from an
+// elevated model's session.
+func decideSandboxOff(call event, command string, config Config) string {
 	launcher, why := LauncherForm(command, config)
 	if why == "" {
 		return RootOwned(launcher)
+	}
+	if unsandboxedHarness(call) {
+		why += ". This harness sends no sandbox flag and applies no sandbox of its own (the event carries neither " +
+			"transcript_path nor model), so every command from it is decided as if the sandbox were off, which is what " +
+			"it is: ordinary shell work belongs in Claude Code or Codex, where it runs inside one"
 	}
 	words := strings.Fields(command)
 	if len(words) == 0 || !isElevatedToolWord(words[0]) {
@@ -162,30 +360,239 @@ func decideBash(call event, input toolInput, directories []string, config Config
 	return ElevatedForm(command, call.Cwd, config)
 }
 
+// onlyBuilds reports whether a go or cargo test command's arguments only build the tests. For go
+// it is the value -c ends with: go reads a boolean flag as many times as it is given and the last
+// one counts, so "go test -c -c=false ./..." runs the tests; finding a "-c" anywhere admitted it
+// (GPT 6.1 sol final review of PR 9, finding 7). Arguments after -args go to the test binary. A -c
+// value that is not a boolean, or a -c spelled any other way, does not count as building only.
+//
+// Options are read by arity, as go and cargo read them (second review of PR 9, finding 7): in
+// "go test -o -c ./x" the -c is -o's value and the tests run, and in "go test -c -run -c=false"
+// the -c=false is -run's pattern and they only build. An option go test does not list is refused,
+// since how many words it takes cannot be told. For cargo, --no-run counts only before "--" (after
+// it the word goes to the test binary) and not as another option's value.
+func onlyBuilds(program string, arguments []string) bool {
+	if program == "cargo" {
+		return cargoOnlyBuilds(arguments)
+	}
+	builds := false
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if argument == "-args" || argument == "--args" {
+			break
+		}
+		if !strings.HasPrefix(argument, "-") || argument == "-" {
+			continue
+		}
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(argument, "-"), "-"), "=")
+		switch {
+		case slices.Contains(goTestValueFlags, name):
+			if !hasValue {
+				index++
+			}
+		case slices.Contains(goTestBoolFlags, name):
+			parsed := true
+			if hasValue {
+				var err error
+				if parsed, err = strconv.ParseBool(value); err != nil {
+					return false
+				}
+			}
+			if name == "c" {
+				builds = parsed
+			}
+		default:
+			return false
+		}
+	}
+	return builds
+}
+
+// goTestValueFlags and goTestBoolFlags are go test's options ("go help testflag", "go help build"),
+// by whether they take a value.
+var goTestValueFlags = []string{"C", "o", "p", "asmflags", "buildmode", "compiler", "gccgoflags", "gcflags", "installsuffix",
+	"ldflags", "mod", "modfile", "overlay", "pgo", "pkgdir", "tags", "toolexec", "exec", "covermode", "coverpkg",
+	"coverprofile", "bench", "benchtime", "blockprofile", "blockprofilerate", "count", "cpu", "cpuprofile", "fuzz",
+	"fuzztime", "fuzzminimizetime", "list", "memprofile", "memprofilerate", "mutexprofile", "mutexprofilefraction",
+	"outputdir", "parallel", "run", "skip", "shuffle", "timeout", "trace", "vet"}
+var goTestBoolFlags = []string{"c", "a", "n", "x", "v", "i", "work", "race", "msan", "asan", "cover", "json", "failfast",
+	"short", "benchmem", "fullpath", "trimpath", "linkshared", "buildvcs", "modcacherw"}
+
+// cargoValueFlags are cargo test's options that take the next word as their value (cargo-test(1)).
+var cargoValueFlags = []string{"--package", "-p", "--manifest-path", "--test", "--bin", "--example", "--bench", "--features",
+	"-F", "--target", "--target-dir", "--jobs", "-j", "--profile", "--exclude", "--color", "--message-format", "-Z",
+	"--config", "--lockfile-path", "--partition"}
+
+// cargoOnlyBuilds reports whether cargo's own arguments, before "--", hold --no-run as an option.
+func cargoOnlyBuilds(arguments []string) bool {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		switch {
+		case argument == "--":
+			return false
+		case argument == "--no-run":
+			return true
+		case slices.Contains(cargoValueFlags, argument):
+			index++
+		}
+	}
+	return false
+}
+
+// runsTestsInSandbox returns "" unless command would run tests in the agent's own sandbox, where
+// loopback is open and egress goes through the proxy: "go test" or "cargo test" (bench, nextest and
+// cargo's t alias included) without the option that only builds them. Every test runs inside the
+// game profile (owner, 2026-10-19), and until now only a sandbox-off test run was refused, which
+// left the common case -- a plain "go test ./..." inside the sandbox -- passing (audit N7). The
+// lock is the gate compiled into each test binary; this is the rule enforced where it is broken.
+func runsTestsInSandbox(command string, config Config) string {
+	for _, segment := range commandSegments(command) {
+		words := commandWords(strings.Fields(segment))
+		if len(words) == 0 {
+			continue
+		}
+		program := filepath.Base(words[0])
+		if program != "go" && program != "cargo" || !slices.ContainsFunc(words[1:], isTestSubcommand) || onlyBuilds(program, words[1:]) {
+			continue
+		}
+		return program + " " + strings.Join(words[1:], " ") + " would run tests inside the agent sandbox, where loopback is open; " +
+			"every test runs inside the game profile (containment/agent-containment.md, Tests). Build them here, then run each " +
+			"binary with the sandbox off: \"cargo test --no-run -p CRATE\" prints each Executable, then " +
+			config.LauncherDirectory + "/d1-nonet " + filepath.Join(config.Root, "d1-server/target/debug/deps") + "/CRATE-HASH [filter]; " +
+			"for Go, \"go test -c -o " + filepath.Join(config.Root, "testbin") + "/ ./internal/...\", then " +
+			config.LauncherDirectory + "/d1-nonet " + filepath.Join(config.Root, "testbin") + "/NAME.test [-test.run X]"
+	}
+	return ""
+}
+
+// isTestSubcommand reports whether word is a go or cargo subcommand that runs tests.
+func isTestSubcommand(word string) bool {
+	return word == "test" || word == "t" || word == "bench" || word == "nextest"
+}
+
 // isElevatedToolWord reports whether word names one of elevatedGrants, by name or path.
 func isElevatedToolWord(word string) bool {
 	_, known := elevatedGrants[filepath.Base(word)]
 	return known
 }
 
-// firstWordMatching returns the first word of any command segment (split at ; & | ( ) { } `,
-// $( and newlines, assignments skipped) that matches, or "". A tripwire: it is spelling-based.
-func firstWordMatching(command string, matches func(string) bool) string {
-	segments := strings.FieldsFunc(strings.ReplaceAll(command, "$(", ";"), func(character rune) bool {
+// commandSegments splits a command at ; & | ( ) { } `, $( and newlines: what bash could run as
+// separate commands, as a tripwire reads it (spelling-based, quotes not tracked).
+func commandSegments(command string) []string {
+	return strings.FieldsFunc(strings.ReplaceAll(command, "$(", ";"), func(character rune) bool {
 		return strings.ContainsRune(";&|(){}`\n", character)
 	})
-	for _, segment := range segments {
-		for _, word := range strings.Fields(segment) {
-			if isAssignment(word) {
+}
+
+// firstWordMatching returns the first word of any command segment (commandSegments, assignments
+// and command wrappers skipped) that matches, or "". A tripwire: it is spelling-based.
+func firstWordMatching(command string, matches func(string) bool) string {
+	for _, segment := range commandSegments(command) {
+		words := unquoted(strings.Fields(segment))
+		for _, candidate := range [][]string{skipAssignments(words), commandWords(words)} {
+			if len(candidate) > 0 && matches(candidate[0]) {
+				return candidate[0]
+			}
+		}
+	}
+	return ""
+}
+
+// unquoted is words with every quote mark and backslash removed, as the shell removes them from a
+// program's name: only the marks around a word were removed, so go te""st was not go test and
+// ran the tests (second review of PR 9, finding 7), and d1-re""comp was not a game binary.
+func unquoted(words []string) []string {
+	clean := make([]string, len(words))
+	for index, word := range words {
+		clean[index] = strings.NewReplacer("'", "", "\"", "", "\\", "").Replace(word)
+	}
+	return clean
+}
+
+// skipAssignments is words without the NAME=value assignments in front.
+func skipAssignments(words []string) []string {
+	for len(words) > 0 && isAssignment(words[0]) {
+		words = words[1:]
+	}
+	return words
+}
+
+// commandWrapper is how a program that runs its arguments as a command reads them: the short
+// options that take the next word as a value, the long ones that do, and how many plain arguments
+// come before the command (timeout's duration).
+type commandWrapper struct {
+	values     string
+	long       []string
+	positional int
+}
+
+// commandWrappers are the ordinary programs that run the rest of their arguments as a command. "env
+// go test ./..." ran tests inside the sandbox past a check that read only the first word (review of
+// PR 9, R5); a game binary or an excluded program behind one of these was missed the same way. A
+// shell's -c string is split into words like the rest, so "bash -c 'go test'" reads as go test.
+var commandWrappers = map[string]commandWrapper{
+	"env":        {values: "uPC", long: []string{"--unset", "--chdir"}},
+	"command":    {},
+	"exec":       {values: "a"},
+	"nohup":      {},
+	"time":       {},
+	"nice":       {values: "n", long: []string{"--adjustment"}},
+	"timeout":    {values: "sk", long: []string{"--signal", "--kill-after"}, positional: 1},
+	"caffeinate": {values: "tw"},
+	"stdbuf":     {values: "ioe"},
+	"xargs":      {values: "IELnPsJRd", long: []string{"--delimiter", "--max-args", "--max-procs", "--max-lines", "--replace", "--eof"}},
+	"sudo":       {values: "ugpChDRrTU", long: []string{"--user", "--group", "--prompt", "--chdir"}},
+	"sh":         {values: "o"},
+	"bash":       {values: "o"},
+	"zsh":        {values: "o"},
+}
+
+// commandWords is one command segment's words from the program that runs on: quote marks around
+// each word removed, then assignments and the wrappers in commandWrappers (with their options and
+// arguments) skipped, as often as they nest. The program's own name stays as spelled, path and all.
+func commandWords(words []string) []string {
+	words = unquoted(words)
+	for {
+		words = skipAssignments(words)
+		if len(words) == 0 {
+			return words
+		}
+		name := filepath.Base(words[0])
+		wrapper, known := commandWrappers[name]
+		if !known {
+			return words
+		}
+		words = words[1:]
+		positional := wrapper.positional
+		for len(words) > 0 {
+			word := words[0]
+			if word == "--" {
+				words = words[1:]
+				break
+			}
+			if name == "command" && (word == "-v" || word == "-V") {
+				return nil // it only says what the name is, and runs nothing
+			}
+			if strings.HasPrefix(word, "-") && len(word) > 1 {
+				words = words[1:]
+				takesValue := len(word) == 2 && strings.IndexByte(wrapper.values, word[1]) >= 0 || slices.Contains(wrapper.long, word)
+				if takesValue && len(words) > 0 {
+					words = words[1:]
+				}
 				continue
 			}
-			if matches(word) {
-				return word
+			if isAssignment(word) {
+				words = words[1:]
+				continue
+			}
+			if positional > 0 {
+				positional--
+				words = words[1:]
+				continue
 			}
 			break
 		}
 	}
-	return ""
 }
 
 // testGateOverrides are the variable-name spellings that would drop the test gate from a Rust
@@ -266,8 +673,13 @@ func LauncherForm(command string, config Config) (string, string) {
 }
 
 // runsTests reports whether a program and its arguments run tests: a test binary, or cargo or go
-// with a test, bench or nextest subcommand (cargo's t alias included).
+// with a test, bench or nextest subcommand (cargo's t alias included), behind any of
+// commandWrappers ("d1-localonly /usr/bin/env go test").
 func runsTests(words []string, config Config) bool {
+	words = commandWords(words)
+	if len(words) == 0 {
+		return false
+	}
 	if isTestBinary(words[0], config) || strings.HasSuffix(words[0], ".test") {
 		return true
 	}

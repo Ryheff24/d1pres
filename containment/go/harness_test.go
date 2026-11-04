@@ -52,6 +52,17 @@ func runTests(tests *testing.M) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	// D1_COVERDIR (set by the coverage workflow) is where the launchers and the hook, built by
+	// buildCommand with -cover, write what the suite runs of them; go test's own profile does not
+	// see a subprocess. Each binary reads it as GOCOVERDIR, which is set here and not in the
+	// workflow, so go test's own coverage of this binary is left as it is.
+	if directory := os.Getenv("D1_COVERDIR"); directory != "" {
+		err = os.Setenv("GOCOVERDIR", directory)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
 	err = buildHelpers()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -72,12 +83,26 @@ func buildHelpers() error {
 	brokerSocketPath = filepath.Join(controlDirectory, "a")
 	for output, source := range map[string]string{gatePath: "./testdata/probe", nonetPath: "./cmd/d1-nonet"} {
 		command := exec.Command("go", "build", "-o", output, source)
+		if source != "./testdata/probe" {
+			command = buildCommand("-o", output, source)
+		}
 		log, err := command.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("build %s: %w\n%s", source, err, log)
 		}
 	}
 	return nil
+}
+
+// buildCommand is "go build" with arguments, for a command of this module the suite runs as a
+// subprocess (cmd/*). When D1_COVERDIR is set it is built with -cover over the whole module, so
+// what the suite runs of it, the gate package included, counts in the coverage report instead of
+// showing 0%. A run that ends in exec (the launchers' success path) writes nothing; its exits do.
+func buildCommand(arguments ...string) *exec.Cmd {
+	if os.Getenv("D1_COVERDIR") != "" {
+		arguments = append([]string{"-cover", "-coverpkg=./..."}, arguments...)
+	}
+	return exec.Command("go", append([]string{"build"}, arguments...)...)
 }
 
 // checkSeatbelt applies a trivial profile once. Inside another sandbox, the agent's included,

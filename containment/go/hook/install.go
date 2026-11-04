@@ -28,13 +28,54 @@ func Settings(config Config) map[string]any {
 	}
 }
 
-// denyRules is one Edit rule per protected path.
+// denyRules is one Edit rule per protected path, and one per protected tree, which Claude Code
+// reads as a gitignore-style pattern (so it also denies Bash writes under the tree in the agent's
+// own sandbox). Each worktree pattern (codexWorktreePatterns) gets the same rules, as globs, so a
+// worktree's CLAUDE.md, gate call sites and containment sources are denied to Claude Code's tools
+// as the main checkout's are (second review of PR 9, finding 6). A worktree outside the patterns is
+// refused at git worktree add and move, and reported by check.
 func denyRules(config Config) []string {
 	var rules []string
 	for _, path := range ProtectedPaths(config) {
 		rules = append(rules, "Edit(/"+path+")")
 	}
+	for _, path := range ProtectedTreePaths(config) {
+		rules = append(rules, "Edit(/"+path+"/**)")
+	}
+	for _, pattern := range codexWorktreePatterns {
+		base := filepath.Join(config.Root, pattern)
+		for _, name := range gate.ProtectedFiles {
+			rules = append(rules, "Edit(/"+filepath.Join(base, name)+")")
+		}
+		for _, tree := range gate.ProtectedTrees {
+			rules = append(rules, "Edit(/"+filepath.Join(base, tree)+"/**)")
+		}
+	}
 	return rules
+}
+
+// checkWorktrees reports each worktree git has registered: inside the patterns the Codex
+// requirements and the deny rules cover, or not. One outside them has only the hook's
+// RegisteredWorktrees check over its protected copies, and none from Codex's profile.
+func checkWorktrees(config Config) []Line {
+	root, err := canonicalPath(config.Root)
+	if err != nil {
+		return []Line{fact(false, "worktrees: the root cannot be resolved ("+err.Error()+")")}
+	}
+	var lines []Line
+	for _, worktree := range RegisteredWorktrees(config) {
+		resolved, err := canonicalPath(worktree)
+		if err != nil {
+			continue
+		}
+		inside := inWorktreePattern(resolved, root)
+		text := "worktree: " + worktree + " is inside runs/wt-NAME or .claude/worktrees/NAME, where its protected copies are read-only"
+		if !inside {
+			text = "worktree: " + worktree + " is outside runs/wt-NAME and .claude/worktrees/NAME, so Codex's profile and Claude Code's deny rules do not cover its protected copies; move it with git worktree move"
+		}
+		lines = append(lines, fact(inside, text))
+	}
+	return lines
 }
 
 // Line is one fact Check measured: OK or not, and what it says.
@@ -59,12 +100,32 @@ func Check(config Config) []Line {
 		lines = append(lines, fact(why == "" && executable, fmt.Sprintf("install: %s root-owned, closed to other writes%s %s", path, modeText(info, err), why)))
 	}
 	lines = append(lines, checkSettings(config)...)
+	lines = append(lines, checkCodex(config)...)
+	lines = append(lines, checkWorktrees(config)...)
 	for _, name := range gate.ProtectedFiles {
 		_, err := os.Stat(filepath.Join(config.Root, name))
 		optional := slices.Contains(optionalFiles, name)
 		lines = append(lines, fact(err == nil || optional, "protected: "+name+presence(err, optional)))
 	}
+	for _, name := range gate.ProtectedTrees {
+		info, err := os.Stat(filepath.Join(config.Root, name))
+		directory := err == nil && info.IsDir()
+		lines = append(lines, fact(directory || err != nil, "protected tree: "+name+"/ (every file under it)"+treePresence(err, directory)))
+	}
 	return lines
+}
+
+// treePresence says whether a protected tree is a directory; one that does not exist yet is
+// protected against being created, like an optional file.
+func treePresence(err error, directory bool) string {
+	switch {
+	case directory:
+		return " is present"
+	case err != nil:
+		return " is absent; creating a file in it is refused"
+	default:
+		return " is not a directory"
+	}
 }
 
 // fact makes a Line.
@@ -142,6 +203,12 @@ func checkSettings(config Config) []Line {
 		}
 	}
 	for _, entry := range settings.Sandbox.ExcludedCommands {
+		// The Codex plugin's two entries are node on its companion script, which CompanionForm holds
+		// to one command; without this the check printed a FAIL nobody could clear (2026-10-27
+		// review §1: a check that always fails is a check nobody reads).
+		if isCompanion(strings.ReplaceAll(entry, "*", "")) {
+			continue
+		}
 		if !isExcludedName(strings.TrimSuffix(strings.Fields(entry + " x")[0], "*")) {
 			unknown = append(unknown, entry)
 		}

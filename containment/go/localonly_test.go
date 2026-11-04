@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -23,7 +22,7 @@ const listedPort = "8789"
 func buildLocalOnly(t *testing.T, root string) string {
 	t.Helper()
 	launcher := filepath.Join(root, "bin", "d1-localonly")
-	command := exec.Command("go", "build", "-ldflags", "-X main.repositoryRoot="+root, "-o", launcher, "./cmd/d1-localonly")
+	command := buildCommand("-ldflags", "-X main.repositoryRoot="+root, "-o", launcher, "./cmd/d1-localonly")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build d1-localonly: %v\n%s", err, output)
@@ -131,6 +130,36 @@ func TestLocalProtectedFiles(t *testing.T) {
 	}
 }
 
+// TestLocalProtectedTrees (drift): the subpaths local.sb denies are gate.ProtectedTrees, nothing
+// more, nothing less, and every directory above one is denied as an exact path as well, so the
+// rename around a file rule (the comment above them) is closed for a tree too. Pure parsing.
+func TestLocalProtectedTrees(t *testing.T) {
+	var denied []string
+	for _, match := range regexp.MustCompile(`\(repo-tree "([^"]*)"\)`).FindAllStringSubmatch(sbplRulesOnly(LocalProfile), -1) {
+		denied = append(denied, strings.TrimPrefix(match[1], "/"))
+	}
+	wanted := slices.Clone(gate.ProtectedTrees)
+	slices.Sort(denied)
+	slices.Sort(wanted)
+	if !slices.Equal(denied, wanted) {
+		t.Fatalf("local.sb's subpath denies differ from gate.ProtectedTrees:\nlocal.sb: %q\nwanted:   %q", denied, wanted)
+	}
+	if len(wanted) == 0 {
+		t.Fatal("the drift check found no trees to mean anything")
+	}
+	exact := map[string]bool{}
+	for _, match := range regexp.MustCompile(`\(repo-path "([^"]*)"\)`).FindAllStringSubmatch(sbplRulesOnly(LocalProfile), -1) {
+		exact[strings.TrimPrefix(match[1], "/")] = true
+	}
+	for _, tree := range gate.ProtectedTrees {
+		for path := filepath.Dir(tree); path != "."; path = filepath.Dir(path) {
+			if !exact[path] {
+				t.Errorf("local.sb denies the tree %s but not its parent %s as an exact path, so %s could be renamed", tree, path, path)
+			}
+		}
+	}
+}
+
 // sbplRulesOnly drops comments and the define line, leaving the rules that use repo-path.
 func sbplRulesOnly(profile string) string {
 	var rules []string
@@ -162,7 +191,7 @@ func TestLocalOnlyRuns(t *testing.T) {
 		t.Fatalf("a loopback connection on an unlisted port was not refused: status %d", status)
 	}
 	unrooted := filepath.Join(t.TempDir(), "d1-localonly")
-	log, err := exec.Command("go", "build", "-o", unrooted, "./cmd/d1-localonly").CombinedOutput()
+	log, err := buildCommand("-o", unrooted, "./cmd/d1-localonly").CombinedOutput()
 	if err != nil {
 		t.Fatalf("build: %v\n%s", err, log)
 	}

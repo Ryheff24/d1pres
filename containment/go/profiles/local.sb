@@ -36,6 +36,7 @@
 ; rule (measured). An exact path on a directory stops that rename and leaves the files inside it
 ; writable.
 (define (repo-path path) (literal (string-append (param "REPO") path))) ; REPO followed by path, exactly
+(define (repo-tree path) (subpath (string-append (param "REPO") path))) ; REPO followed by path, and everything under it
 (deny file-write* (repo-path "") (repo-path "/CLAUDE.md") (repo-path "/AGENTS.md")) ; the repository itself and the agent instructions
 (deny file-write* (repo-path "/.claude") (repo-path "/.claude/settings.json") (repo-path "/.claude/settings.local.json")) ; Claude Code's project settings
 (deny file-write* (repo-path "/.git") (repo-path "/.git/config") (repo-path "/.git/hooks") (repo-path "/.git/hooks/pre-push")) ; what git runs for the owner
@@ -67,6 +68,14 @@
 (deny file-write* (repo-path "/containment/go/profiles/orkey.sb")) ; d1-orkey's policy
 (deny file-write* (repo-path "/containment/go/cmd/d1-orkey") (repo-path "/containment/go/cmd/d1-orkey/main.go")) ; d1-orkey
 (deny file-write* (repo-path "/containment/go/orkey") (repo-path "/containment/go/orkey/orkey.go") (repo-path "/containment/go/orkey/controls.go")) ; its forwarder and controls
+(deny file-write* (repo-path "/.codex") (repo-path "/.codex/hooks.json")) ; what makes Codex run the hook (Codex trusts it by hash)
+(deny file-write* (repo-path "/containment/settings-allow.sh") (repo-path "/containment/netguard-requirements.md")) ; the owner runs this script; the profile decision record
+; The protected trees (gate.ProtectedTrees), each as one subpath, so a file nobody has listed yet
+; is denied too: install.sh builds and tests containment/go and containment/c in the owner's
+; terminal, and git and Claude Code run whatever is in a hooks directory. Every directory above one
+; is denied as an exact path above (TestLocalProtectedTrees keeps this list and the Go one equal).
+(deny file-write* (repo-tree "/.claude/hooks") (repo-tree "/.git/hooks")) ; what Claude Code and git run for the owner
+(deny file-write* (repo-tree "/containment/c") (repo-tree "/containment/go")) ; the gate, the launchers, the hook and their controls
 (deny file-write* (regex #"\.sb$")) ; no profile can be rewritten, even in temporary space
 (deny file-write* (regex #"^/private/tmp/claude")) ; nor the agent's session state, which it reads back
 ; Not in this profile, and why: a literal 127.0.0.1 (Seatbelt refuses it: "host must be * or

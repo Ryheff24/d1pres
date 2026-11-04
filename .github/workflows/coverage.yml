@@ -4,8 +4,16 @@
 # On a PR the comment has a Patch Coverage column: of this PR's changed lines, how many a test
 # runs. Its coverage links open a page (an artifact) of the PR's changed hunks with each line's
 # coverage beside them. The page and the comparison need a report from main to compare against,
-# which the first run on main after this merges stores. Code that tests run only as built
-# binaries (cmd/*) is not counted.
+# which the first run on main after this merges stores.
+#
+# The suite runs the launchers, the hook and d1-testgate-header (cmd/*) as built binaries, which
+# go test's profile cannot see. With D1_COVERDIR set, the suite builds them with -cover
+# (buildCommand, harness_test.go) and each writes what it ran there; the merge step adds that to
+# the profile. A run that ends in exec (a launcher's success path) writes nothing.
+#
+# The coverage gate (.github/coverage-gate) fails the run when total statement coverage is under
+# 60%, or when any file with statements has none covered: a 0% file fails outright (owner,
+# 2026-11-03). It prints every file, worst first, in the job summary.
 #
 # A failing test fails the suite step itself, so the red step is the one whose log names the
 # test; on a PR the failing tests are also posted as a comment. octocov still reports what ran.
@@ -39,6 +47,9 @@ jobs:
     timeout-minutes: 20
     env:
       SKIP: ^TestCGate|^TestBuiltGateStacks$
+      # Under /private/tmp, which game.sb and local.sb let a contained binary write; the runner's
+      # own temporary directory is not.
+      D1_COVERDIR: /private/tmp/d1-covdata
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,7 +90,20 @@ jobs:
             n=${fd##*/}
             if [ "$n" -gt 2 ] && [ "$n" -ne 255 ]; then eval "exec $n>&-"; fi
           done
+          mkdir -p "$D1_COVERDIR"
           go test -count=1 -skip "$SKIP" -coverpkg=./... -coverprofile="$GITHUB_WORKSPACE/coverage.out" ./... 2>&1 | tee "$RUNNER_TEMP/suite.txt"
+
+      # What the suite ran as subprocesses, into the one profile octocov and the gate read. The
+      # block keys are the same as go test's, so a block both saw is one block.
+      - name: add the subprocesses' coverage
+        working-directory: containment/go
+        run: |
+          go tool covdata textfmt -i="$D1_COVERDIR" -o "$RUNNER_TEMP/subprocesses.out"
+          tail -n +2 "$RUNNER_TEMP/subprocesses.out" >> "$GITHUB_WORKSPACE/coverage.out"
+
+      - name: coverage gate (60% total, no file at 0%)
+        working-directory: .github/coverage-gate
+        run: go run . -min 60 "$GITHUB_WORKSPACE/coverage.out"
 
       # The failing tests as a PR comment, readable without the job log.
       - name: post the failing tests on the PR
