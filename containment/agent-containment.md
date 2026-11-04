@@ -192,6 +192,19 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
     probe directory goes with `rm -rf`, which does not follow links. 65cfb10's probe ran
     `: > runs/.codex-link-source-PID` in the owner's terminal, which truncated whatever a planted
     link there pointed to.
+  - **A probe measures only where it ran** (third review of PR 9). An agent can rename anything in
+    `runs/`, so a probe directory swapped for a link to `containment/go` turned that tree's refusal
+    into a false OK for the probe. Each probe is now one step under profile `d1` that goes into each
+    directory of its path in turn, by name, printing the real path reached (`pwd -P`) after each
+    `cd`, and the owner's terminal counts the result only if those are exactly the directories it
+    made or named. After a `cd` the step's directory is the directory itself, so a later swap
+    changes nothing; an earlier one shows. The hard-link control (a file made and hard-linked in
+    the probe directory) runs in the same step as the `CLAUDE.md` link and must succeed. Measured
+    on scratch trees with a stand-in for Codex that runs each step for real behind read-only
+    permissions: an agent swapping the hard-link directory for a link to `containment/go` got a
+    false OK from b37deed's probe and a FAIL from this one; swapping a worktree probe directory for
+    a link to the root also FAILs. Left open: a link put at the probe's last name in the instant
+    between its check that the name is no link and its open.
   - **Not measured yet:** how Codex maps the plugin's `sandbox: "workspace-write"` request under
     the allowlist (the docs say it falls back to an allowed value); a protected file that does not
     exist yet, created in another case (`agents.md` for an absent `AGENTS.md`), which a literal or
@@ -274,7 +287,7 @@ Elevated models: `gpt-6.1-sol`, `gpt-6-astra`, `claude-opus-5-5`, `claude-sonnet
 | Running tests (cargo and Go test binaries) | yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run) | yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run) | runsTestsInSandbox, LauncherForm (hook.go); the test gate in each binary |
 | Servers and other programs that listen | yes: only under d1-localonly, sandbox off, never a game binary or a test | yes: only under d1-localonly, sandbox off, never a game binary or a test | LauncherForm (hook.go) |
 | Codex through the plugin's companion script | yes: setup, task, status, result, cancel, alone; no reviews | yes: setup, task, status, result, cancel, alone; no reviews | CompanionForm (shell.go) |
-| The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, codex exec | yes: alone, the line through the tripwire, no redirection into a file and no codex -o (they run outside the sandbox, so the file would be opened after the check); codex only with its own sandbox left on | no | decideBash (hook.go), ExcludedForm, codexForm (shell.go) |
+| The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, codex exec | yes: alone, the line through the tripwire, no redirection into a file and no codex -o (they run outside the sandbox, so the file would be opened after the check); codex only with its own sandbox left on; codesign only to display or verify, to standard output | no | decideBash (hook.go), ExcludedForm, codexForm (shell.go) |
 | copilot (its pinned path no longer exists, it has no sandbox of its own, and --allow-tool shell grants what --allow-all was refused for) | no | no | ExcludedForm (shell.go) |
 | Read-only logs and profilers: log show and stream, xctrace export and list, sample, vmmap, footprint, malloc_history, metalperftrace overview and listen | yes: at its own path, alone, one line of plain words or '...' text, listed options only, this project's processes by PID and files in the repository only, no output files | yes: at its own path, alone, one line of plain words or '...' text, listed options only, this project's processes by PID and files in the repository only, no output files | ProfilerForm, profilerSpecs (profiler.go) |
 | security (also sandbox-excluded) | yes: find-identity only | no | ExcludedForm (shell.go) |
@@ -389,6 +402,13 @@ decides it per call (`containment/go/hook/elevated.go`). The ids and the dates a
     Before `--`, every word must be literal (no `$`, `~`, glob or braces): `$HOME/.zshrc` is not
     the path codex is handed, and an unquoted `$X` can split into options (R1, R2). The one
     expansion admitted is `-C "$PWD"`, the session's directory.
+  - `codesign` is admitted only to display (`-d`) or verify (`-v`, `--verify`), every word
+    literal, with `--deep`, `--strict`, `--xml`, `--der`, `--verbose`, `-R`, `-a`, and output only
+    to standard output (`-r-`, `--entitlements :-`, `--file-list -`): during display `-r`,
+    `--entitlements` and `--file-list` write to the path they are given, outside the sandbox, so
+    `codesign -d -r CLAUDE.m[d] /bin/ls` overwrote `CLAUDE.md` with the glob hiding the name (third
+    review of PR 9). Signing, `--remove-signature`, `--extract-certificates` and
+    `--check-notarization` (a network query) stay the owner's.
   - `security` is admitted only as `find-identity`: its other subcommands read the keychain
     (`find-generic-password -w` prints a password). `xcrun` only queries the SDK (`--show-sdk-*`,
     `-f`, `--find`, `--sdk NAME` with one of them) or starts `simctl` or `devicectl`.

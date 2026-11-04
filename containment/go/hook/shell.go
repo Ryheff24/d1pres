@@ -164,6 +164,11 @@ func ExcludedForm(command string, cwd string, config Config) string {
 			return why
 		}
 	}
+	if name == "codesign" {
+		if why := codesignForm(arguments[1:]); why != "" {
+			return why
+		}
+	}
 	if why := Tripwire(line, config); why != "" {
 		return why
 	}
@@ -472,6 +477,72 @@ func plainExpansion(text string) bool {
 		end++
 	}
 	return end > 1 && (end == len(text) || text[end] != '[')
+}
+
+// codesignFlags are the codesign options that take no value and write nothing: display, verify
+// and how much they print. --check-notarization is left out: it asks Apple over the network.
+var codesignFlags = []string{"-d", "--display", "-v", "--verify", "--deep", "--strict", "--no-strict", "--xml", "--der", "--verbose"}
+
+// codesignValues are the codesign options that take a value, each with the values admitted (nil
+// for any literal word). -r, --entitlements and --file-list write to the path they are given
+// during display, so only standard output is admitted.
+var codesignValues = map[string][]string{
+	"-r": {"-"}, "--requirements": {"-"},
+	"--entitlements": {"-", ":-"},
+	"--file-list":    {"-"},
+	"-R":             nil, "--test-requirement": nil,
+	"-a": nil, "--architecture": nil,
+}
+
+// codesignForm returns "" when codesign's arguments only display or verify a signature and write
+// no file, every word literal. codesign runs outside the sandbox, and "codesign -d -r CLAUDE.m[d]
+// /bin/ls" wrote the requirements over CLAUDE.md, the glob hiding the name from the tripwire (third
+// review of PR 9). Signing, --remove-signature, --extract-certificates and every other option stay
+// the owner's: each writes a file the hook can only check by name before codesign opens it.
+func codesignForm(arguments []shellWord) string {
+	mode := false
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		text := argument.text
+		if !argument.literal {
+			return "codesign " + text + ": every word must be literal (no $, ~, glob or braces), so the hook sees the paths codesign is handed"
+		}
+		if !strings.HasPrefix(text, "-") || text == "-" {
+			continue
+		}
+		if len(text) > 1 && text[1] != '-' && strings.Trim(text[1:], "dv") == "" {
+			mode = true
+			continue
+		}
+		name, value, inline := strings.Cut(text, "=")
+		if strings.HasPrefix(text, "-r") && !strings.HasPrefix(text, "--") && len(text) > 2 {
+			name, value, inline = "-r", text[2:], true
+		}
+		if slices.Contains(codesignFlags, name) && (!inline || name == "--verbose" || name == "--strict") {
+			mode = mode || name == "--display" || name == "--verify"
+			continue
+		}
+		allowed, takes := codesignValues[name]
+		if !takes {
+			return "codesign " + text + ": only display (-d) and verify (-v, --verify) are admitted, with " +
+				strings.Join(codesignFlags, " ") + ", -r- and --entitlements :-; signing and every option that writes a file stay the owner's"
+		}
+		if !inline {
+			if index+1 >= len(arguments) || !arguments[index+1].literal {
+				return "codesign " + name + ": its value must be a literal word"
+			}
+			index++
+			value = arguments[index].text
+		}
+		if allowed != nil && !slices.Contains(allowed, value) {
+			return "codesign " + name + " " + value + ": during display that option writes to the path it is given, outside the sandbox; " +
+				"use " + name + " " + allowed[len(allowed)-1] + " (standard output)"
+		}
+	}
+	if !mode {
+		return "codesign: only display (-d) and verify (-v, --verify) are admitted; signing stays the owner's"
+	}
+	return ""
 }
 
 // shellWord is one word of a command as the program receives it: quotes removed, and literal false

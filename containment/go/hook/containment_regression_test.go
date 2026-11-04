@@ -485,6 +485,35 @@ func TestSecondReviewPR9(t *testing.T) {
 	})
 }
 
+// TestThirdReviewPR9 covers GPT 6.1 sol's third review of PR 9 (2026-11-03,
+// containment/reviews/REVIEW-gpt-6.1-sol-pr9-third-2026-11-03.md), item 1: codesign runs outside
+// the sandbox, and -r, --entitlements and --file-list write to the path they are given during
+// display. Only display and verify are admitted, writing to standard output. Item 4 is install.sh.
+func TestThirdReviewPR9(t *testing.T) {
+	config := fakeTree(t)
+	checkCommandDecisions(t, config, config.Root, true, []commandDecisionCase{
+		{"requirements_glob", "codesign -d -r CLAUDE.m[d] /bin/ls", true},
+		{"requirements_file", "codesign -d -r runs/r.txt /bin/ls", true},
+		{"requirements_attached", "codesign -d -rruns/r.txt /bin/ls", true},
+		{"requirements_long", "codesign -d --requirements=runs/r.txt /bin/ls", true},
+		{"entitlements_file", "codesign -d --entitlements runs/e.plist /bin/ls", true},
+		{"file_list", "codesign -dvvv --file-list runs/l.txt /bin/ls", true},
+		{"extract_certificates", "codesign -d --extract-certificates /bin/ls", true},
+		{"sign", "codesign -f -s - runs/bin", true},
+		{"remove_signature", "codesign --remove-signature runs/bin", true},
+		{"notarization", "codesign --verify --check-notarization /bin/ls", true},
+		{"no_mode", "codesign /bin/ls", true},
+		{"variable_path", "codesign -d $X", true},
+		{"display_control", "codesign -dvvv /bin/ls", false},
+		{"entitlements_stdout_control", "codesign -d --entitlements :- /bin/ls", false},
+		{"entitlements_equals_control", "codesign -d --entitlements=:- --xml /bin/ls", false},
+		{"requirements_stdout_control", "codesign -d -r- /bin/ls", false},
+		{"verify_control", "codesign --verify --deep --strict --verbose=2 /bin/ls", false},
+		{"requirement_test_control", "codesign -v -R '=anchor apple' /bin/ls", false},
+		{"architecture_control", "codesign -d -a arm64 /bin/ls", false},
+	})
+}
+
 type commandDecisionCase struct {
 	name    string
 	command string

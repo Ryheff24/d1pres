@@ -195,7 +195,9 @@ worktrees it makes and removes (`runs/wt-codex-probe.XXXXXX`, `runs/WT-codex-pro
 by `mktemp`), and a hard link to `CLAUDE.md` refused or not writable. Any FAIL stops the install,
 and so does a `runs/` that is a link. The probes write no bytes and remove only what they made;
 your terminal writes nothing at a path an agent could have planted a link at (second review of
-PR 9, findings 4 and 8). A new Codex session picks up the file. **Your `~/.codex/config.toml`
+PR 9, findings 4 and 8), and each probe counts only if the real directories it ran in, which it
+prints, are the ones it was given, so a probe directory swapped for a link while the install runs
+is a FAIL, not a false OK (third review). A new Codex session picks up the file. **Your `~/.codex/config.toml`
 has a `[sandbox_workspace_write]` table** (`writable_roots` for `drdabber/.derived`): `check` FAILs
 on it, and under the allowlist it no longer applies. To keep that root writable, it has to be
 added to profile `d1` in `hook/codex.go`: the allowlist refuses every other profile.
@@ -233,7 +235,8 @@ their own path, one line of literal words, listed options, this project's PIDs, 
 command naming one of your other excluded programs
 (`xcrun`, `xcodebuild`, `codesign`, `security`, `system_profiler`, `codex exec`, `copilot -p` never with `--allow-all*` or `--yolo`)
 passes only as that one command, a heredoc allowed, no redirection into a file (only `/dev/null`,
-`2>&1` and reads) and no `codex -o`, no `#` comment, nothing chained; a command
+`2>&1` and reads), no `codex -o`, `codesign` only to display or verify with output to standard
+output, no `#` comment, nothing chained; a command
 whose text names a protected file passes only as a pure read (no `; & > < $(` backquote, newline
 or `tee` outside quotes, no word starting with `#`, no `$` but `$NAME` and `${PWD}`, no unquoted `(`, every `|`
 segment a reading program), a spelling-based tripwire that an excluded

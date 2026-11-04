@@ -137,20 +137,74 @@ echo "== codex control (profile d1 under the installed requirements: what it mus
 # removal or a link inside the repository runs under profile d1 itself, so a path an agent swapped
 # for a link mid-probe reaches only what an agent could reach anyway (second review of PR 9,
 # findings 4 and 8).
+# A probe's own directories can still be swapped for a link while it runs (an agent can rename
+# anything in runs/), which turned a refusal at some protected path into a false OK for the one
+# probed (third review of PR 9). So every probe runs as one step under profile d1 that goes into
+# each directory of its path in turn, by name, and prints the real path it reached (pwd -P) after
+# each cd; this terminal counts the result only if those are exactly the directories it made or
+# named, in order. After a cd the shell's directory is that directory itself, so a link swapped in
+# later changes nothing, and one swapped in earlier shows in the printed path. Left open: a link
+# put at the last name in the instant between the probe's check of it and its open.
 codex_in() { local workspace=$1; shift; "$codex" sandbox macos -P d1 --include-managed-config -C "$workspace" -- "$@" 2>&1; }
 codex_failed=0
-# probe WORKSPACE PATH LABEL EXPECT: EXPECT is "write" (a control: it must succeed) or "refuse".
+# probe_script DIR NAME, under profile d1: go into DIR and each directory of NAME, making a missing
+# one, print each real path reached, then open NAME's last part for appending (no bytes written).
+probe_script='cd "$1" || exit 97
+echo "probe-dir $(pwd -P)"
+case $2 in */*) parent=${2%/*} ;; *) parent= ;; esac
+base=${2##*/}
+while [ -n "$parent" ]; do
+  case $parent in */*) first=${parent%%/*}; parent=${parent#*/} ;; *) first=$parent; parent= ;; esac
+  if [ ! -e "$first" ] && [ ! -L "$first" ]; then mkdir "$first" || exit; fi
+  cd "$first" || exit 99
+  echo "probe-dir $(pwd -P)"
+done
+if [ -L "$base" ]; then echo "probe: $base is a link, so opening it would measure its target"; exit 96; fi
+: >> "$base"'
+# cleanup_script DIR NAME MADE...: remove NAME's last part if it is a plain file, then each
+# directory the probe made (relative to DIR, deepest first) if it is empty.
+cleanup_script='cd "$1" || exit 0
+name=$2; shift 2
+case $name in
+  */*) (cd "${name%/*}" 2>/dev/null && if [ -f "${name##*/}" ] && [ ! -L "${name##*/}" ]; then rm -f "${name##*/}"; fi) ;;
+  *) if [ -f "$name" ] && [ ! -L "$name" ]; then rm -f "$name"; fi ;;
+esac
+for made do rmdir "$made" 2>/dev/null; done
+:'
+# walked DIR NAME OUTPUT REACH: every "probe-dir" line of OUTPUT is the next directory on the way
+# from DIR to NAME's own directory, in order; with REACH "full" the last one is that directory.
+walked() {
+  local want=$1 rest line reached=no
+  case $2 in */*) rest=${2%/*} ;; *) rest= ;; esac
+  while IFS= read -r line; do
+    case $line in "probe-dir "*) ;; *) continue ;; esac
+    if [ "$reached" = yes ] || [ "${line#probe-dir }" != "$want" ]; then return 1; fi
+    if [ -z "$rest" ]; then reached=yes; continue; fi
+    case $rest in */*) want=$want/${rest%%/*}; rest=${rest#*/} ;; *) want=$want/$rest; rest= ;; esac
+  done <<< "$3"
+  [ "$4" != full ] || [ "$reached" = yes ]
+}
+# probe WORKSPACE DIR NAME LABEL EXPECT: EXPECT is "write" (a control: it must succeed) or "refuse".
 probe() {
-  local workspace=$1 path=$2 label=$3 expect=$4 out status=0 existed=no dir
+  local workspace=$1 dir=$2 name=$3 label=$4 expect=$5 out status=0 existed=no part reach=part
   local -a missing=()
-  if [ -e "$path" ] || [ -L "$path" ]; then existed=yes; fi
-  dir=${path%/*}
-  while [ ! -e "$dir" ] && [ ! -L "$dir" ]; do missing+=("$dir"); dir=${dir%/*}; done
-  out=$(codex_in "$workspace" /bin/sh -c 'mkdir -p "${1%/*}" && : >> "$1"' probe "$path") || status=$?
+  if [ -e "$dir/$name" ] || [ -L "$dir/$name" ]; then existed=yes; fi
+  part=${name%/*}
+  if [ "$part" = "$name" ]; then part=; fi
+  while [ -n "$part" ] && [ ! -e "$dir/$part" ] && [ ! -L "$dir/$part" ]; do
+    missing+=("$part")
+    case $part in */*) part=${part%/*} ;; *) part= ;; esac
+  done
+  out=$(codex_in "$workspace" /bin/sh -c "$probe_script" probe "$dir" "$name") || status=$?
   if [ "$existed" = no ]; then
-    codex_in "$workspace" /bin/sh -c 'if [ -f "$1" ] && [ ! -L "$1" ]; then rm -f "$1"; fi; shift; for dir do rmdir "$dir" 2>/dev/null; done; :' \
-      cleanup "$path" ${missing[@]+"${missing[@]}"} > /dev/null || true
-    if [ -f "$path" ] && [ ! -L "$path" ]; then echo "note: this probe made $path and profile d1 refuses removing it; remove it by hand"; fi
+    codex_in "$workspace" /bin/sh -c "$cleanup_script" cleanup "$dir" "$name" ${missing[@]+"${missing[@]}"} > /dev/null || true
+    if [ -f "$dir/$name" ] && [ ! -L "$dir/$name" ]; then echo "note: this probe made $dir/$name and profile d1 refuses removing it; remove it by hand"; fi
+  fi
+  if [ "$status" = 0 ]; then reach=full; fi
+  if ! walked "$dir" "$name" "$out" "$reach"; then
+    echo "FAIL codex: the probe of $label did not run in the directories it was given (one was moved or replaced by a link meanwhile), so it measured nothing: $out"
+    if [ "$expect" = write ]; then exit 2; fi
+    codex_failed=1; return 0
   fi
   if [ "$expect" = write ]; then
     if [ "$status" = 0 ]; then echo "OK   codex control: profile d1 writes $label"; return 0; fi
@@ -171,10 +225,10 @@ if [ -L "$root/runs" ] || { [ -e "$root/runs" ] && [ ! -d "$root/runs" ]; }; the
 fi
 mkdir -p "$root/runs"
 probe_dir=$(mktemp -d "$root/runs/.codex-control.XXXXXX")
-probe "$root" "$probe_dir/probe" "runs/" write
+probe "$root" "$probe_dir" probe "runs/" write
 rm -rf "$probe_dir"
 for name in CLAUDE.md containment/install.sh .cargo/config.toml containment/go/.codex-probe containment/c/.codex-probe .claude/hooks/.codex-probe .git/hooks/.codex-probe; do
-  probe "$root" "$root/$name" "$name" refuse
+  probe "$root" "$root" "$name" "$name" refuse
 done
 
 # Worktrees (finding 5): the profile's glob keys, measured on two worktree directories made here,
@@ -188,45 +242,57 @@ if ! ( set -C; mkdir "$lower/containment" "$lower/containment/go" && : > "$lower
   rm -rf "$lower" "$upper"
   echo "FAIL codex control: the worktree probe directories changed while they were being made"; exit 2
 fi
-probe "$root" "$lower/control.txt" "runs/wt-*/, a directory in the repository" write
-probe "$root" "$upper/control.txt" "runs/WT-*/, a directory in the repository" write
-probe "$lower" "$lower/notes.txt" "a worktree, as its root" write
-probe "$root" "$lower/CLAUDE.md" "runs/wt-*/CLAUDE.md" refuse
-probe "$root" "$upper/CLAUDE.md" "runs/WT-*/CLAUDE.md" refuse
-probe "$root" "$lower/containment/go/.codex-probe" "runs/wt-*/containment/go/" refuse
-probe "$lower" "$lower/CLAUDE.md" "CLAUDE.md of a worktree that is the workspace root" refuse
-probe "$lower" "$lower/containment/go/.codex-probe" "containment/go/ of a worktree that is the workspace root" refuse
+probe "$root" "$lower" control.txt "runs/wt-*/, a directory in the repository" write
+probe "$root" "$upper" control.txt "runs/WT-*/, a directory in the repository" write
+probe "$lower" "$lower" notes.txt "a worktree, as its root" write
+probe "$root" "$lower" CLAUDE.md "runs/wt-*/CLAUDE.md" refuse
+probe "$root" "$upper" CLAUDE.md "runs/WT-*/CLAUDE.md" refuse
+probe "$root" "$lower" containment/go/.codex-probe "runs/wt-*/containment/go/" refuse
+probe "$lower" "$lower" CLAUDE.md "CLAUDE.md of a worktree that is the workspace root" refuse
+probe "$lower" "$lower" containment/go/.codex-probe "containment/go/ of a worktree that is the workspace root" refuse
 rm -rf "$lower" "$upper"
 
-# Hard links (finding 8). A link to an unprotected file is the control; then a link to CLAUDE.md is
-# either refused, or made and refused when opened for writing. A link that opens for writing stops
-# the install. The control's source is in $work, which no sandbox may write; each link is made under
-# profile d1 in a directory mktemp made here, with ln -n, so a link planted at the name fails with
-# "File exists" instead of putting the new link inside the directory it points to (second review of
-# PR 9, finding 8). A link that was made must be the same file as CLAUDE.md, or the probe stops.
-# Never a byte is written through one; they are removed under profile d1, with their directory.
-link_source=$(mktemp "$work/link-source.XXXXXX")
+# Hard links (finding 8). In one step under profile d1, inside a directory mktemp made here and
+# checked as the probes are: a file made there and hard-linked there is the control, which must
+# succeed; then a link to CLAUDE.md must be refused, or be made (the same file as CLAUDE.md, and
+# not a symbolic link) and be refused when opened for writing. ln -n fails on a link planted at the
+# name instead of linking into the directory it points to (second review, finding 8). A link that
+# opens for writing stops the install. Never a byte is written through one.
 link_dir=$(mktemp -d "$root/runs/.codex-link.XXXXXX")
-if codex_in "$root" /bin/ln -n "$link_source" "$link_dir/control" > /dev/null; then link_control=made; else link_control=refused; fi
+link_script='cd "$1" || exit 97
+echo "probe-dir $(pwd -P)"
+: > source || { echo "probe-control: cannot make a file in the probe directory"; exit 95; }
+/bin/ln -n source control || { echo "probe-control: cannot hard-link a file inside the probe directory"; exit 95; }
+/bin/ln -n "$2" link'
 status=0
-out=$(codex_in "$root" /bin/ln -n "$root/CLAUDE.md" "$link_dir/link") || status=$?
-if [ "$status" != 0 ]; then
+out=$(codex_in "$root" /bin/sh -c "$link_script" probe "$link_dir" "$root/CLAUDE.md") || status=$?
+if ! walked "$link_dir" link "$out" full; then
+  echo "FAIL codex: the hard-link probe did not run in $link_dir (it was moved or replaced by a link meanwhile), so it measured nothing: $out"; codex_failed=1
+elif [ "$status" = 95 ]; then
+  echo "FAIL codex control: profile d1 could not hard-link a file inside runs/, so a refusal for CLAUDE.md proves nothing: $out"; exit 2
+elif [ "$status" != 0 ]; then
   case "$out" in
-    *"Operation not permitted"*) echo "OK   codex: profile d1 refuses hard-linking CLAUDE.md (a link to a file no sandbox writes is $link_control)" ;;
+    *"Operation not permitted"*) echo "OK   codex: profile d1 refuses hard-linking CLAUDE.md (the control link inside runs/ was made)" ;;
     *) echo "FAIL codex: hard-linking CLAUDE.md failed without a sandbox refusal: $out"; codex_failed=1 ;;
   esac
 elif [ ! "$link_dir/link" -ef "$root/CLAUDE.md" ] || [ -L "$link_dir/link" ]; then
   echo "FAIL codex: ln reported a hard link to CLAUDE.md, but $link_dir/link is not one, so the probe measured nothing"; codex_failed=1
 else
   status=0
-  out=$(codex_in "$root" /bin/sh -c ': >> "$1"' probe "$link_dir/link") || status=$?
-  case "$status:$out" in
-    0:*) echo "FAIL codex: under profile d1 a hard link to CLAUDE.md made in runs/ opens for writing, so a write through it changes CLAUDE.md"; codex_failed=1 ;;
-    *"Operation not permitted"*) echo "OK   codex: profile d1 makes a hard link to CLAUDE.md but refuses opening it for writing" ;;
-    *) echo "FAIL codex: opening a hard link to CLAUDE.md failed without a sandbox refusal: $out"; codex_failed=1 ;;
-  esac
+  out=$(codex_in "$root" /bin/sh -c "$probe_script" probe "$link_dir" link) || status=$?
+  reach=part
+  if [ "$status" = 0 ]; then reach=full; fi
+  if ! walked "$link_dir" link "$out" "$reach"; then
+    echo "FAIL codex: opening the hard link did not run in $link_dir, so it measured nothing: $out"; codex_failed=1
+  else
+    case "$status:$out" in
+      0:*) echo "FAIL codex: under profile d1 a hard link to CLAUDE.md made in runs/ opens for writing, so a write through it changes CLAUDE.md"; codex_failed=1 ;;
+      *"Operation not permitted"*) echo "OK   codex: profile d1 makes a hard link to CLAUDE.md but refuses opening it for writing" ;;
+      *) echo "FAIL codex: opening a hard link to CLAUDE.md failed without a sandbox refusal: $out"; codex_failed=1 ;;
+    esac
+  fi
 fi
-codex_in "$root" /bin/rm -f "$link_dir/link" "$link_dir/control" > /dev/null || true
+codex_in "$root" /bin/sh -c 'cd "$1" && rm -f link control source' cleanup "$link_dir" > /dev/null || true
 rm -rf "$link_dir"
 test "$codex_failed" = 0 || { echo "FAIL codex: a protected path is writable under profile d1, or a probe could not tell"; exit 2; }
 
