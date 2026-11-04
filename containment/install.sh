@@ -145,7 +145,9 @@ echo "== codex control (profile d1 under the installed requirements: what it mus
 # named, in order. After a cd the shell's directory is that directory itself, so a link swapped in
 # later changes nothing, and one swapped in earlier shows in the printed path. Left open: a link
 # put at the last name in the instant between the probe's check of it and its open.
-codex_in() { local workspace=$1; shift; "$codex" sandbox macos -P d1 --include-managed-config -C "$workspace" -- "$@" 2>&1; }
+# Codex 0.160 has no platform subcommand: the macOS options are codex sandbox's own, and "macos" would
+# be run as the command (the install of 2026-11-03: "sandbox-exec: execvp() of 'macos' failed").
+codex_in() { local workspace=$1; shift; "$codex" sandbox -P d1 --include-managed-config -C "$workspace" -- "$@" 2>&1; }
 codex_failed=0
 # probe_script DIR NAME, under profile d1: go into DIR and each directory of NAME, making a missing
 # one, print each real path reached, then open NAME's last part for appending (no bytes written).
