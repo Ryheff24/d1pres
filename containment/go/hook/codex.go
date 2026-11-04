@@ -1,10 +1,14 @@
 package hook
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 )
 
 // CodexRequirementsPath is where Codex reads managed requirements on macOS and Linux (/etc is a
@@ -96,6 +100,97 @@ func tomlKey(path string) (string, error) {
 // profile allowlist is deployed.
 var legacySandboxKeys = []string{"sandbox_mode", "[sandbox_workspace_write]"}
 
+// legacySandboxLines are text's lines that set one of legacySandboxKeys, trimmed.
+func legacySandboxLines(text string) []string {
+	var found []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		for _, key := range legacySandboxKeys {
+			if strings.HasPrefix(line, key) {
+				found = append(found, line)
+			}
+		}
+	}
+	return found
+}
+
+// tomlTableHeader is a TOML table or array-of-tables header: bare or quoted keys joined by dots. A
+// value's continuation line, such as `["a"],` inside a multi-line array, is not one.
+var tomlTableHeader = regexp.MustCompile(`^\[\[?\s*[A-Za-z0-9_-]+(\s*\.\s*([A-Za-z0-9_-]+|"[^"]*"))*\s*\]\]?\s*(#.*)?$`)
+
+// withoutLegacySandbox is text without the older sandbox settings: each sandbox_mode line, and the
+// [sandbox_workspace_write] table from its header to the next table header. removed lists the
+// non-blank lines taken out.
+func withoutLegacySandbox(text string) (kept string, removed []string) {
+	var keep strings.Builder
+	inTable := false
+	for _, line := range strings.SplitAfter(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if tomlTableHeader.MatchString(trimmed) {
+			inTable = strings.HasPrefix(trimmed, "[sandbox_workspace_write]")
+		}
+		if inTable || strings.HasPrefix(trimmed, "sandbox_mode") {
+			if trimmed != "" {
+				removed = append(removed, trimmed)
+			}
+			continue
+		}
+		keep.WriteString(line)
+	}
+	return keep.String(), removed
+}
+
+// RemoveLegacySandbox takes the older sandbox settings out of ~/.codex/config.toml, which check
+// requires (owner, 2026-11-04: the install does it, not the owner by hand). Under the managed
+// allowlist they no longer apply anyway (a writable_roots there is ignored; profile d1 decides).
+// The earlier file is kept beside it as config.toml.before-d1-agent-hook.<time>, and the new one
+// replaces it in one rename. A missing file, or one without them, is left alone.
+func RemoveLegacySandbox(config Config) (removed []string, backup string, err error) {
+	path := filepath.Join(config.Home, ".codex", "config.toml")
+	text, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, "", nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	kept, removed := withoutLegacySandbox(string(text))
+	if len(removed) == 0 {
+		return nil, "", nil
+	}
+	if left := legacySandboxLines(kept); len(left) > 0 {
+		return nil, "", fmt.Errorf("%s: after removing the older sandbox settings, %q is still there; nothing was changed", path, left)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, "", err
+	}
+	backup = path + ".before-d1-agent-hook." + time.Now().Format("20060102150405")
+	if err := os.WriteFile(backup, text, info.Mode().Perm()); err != nil {
+		return nil, "", err
+	}
+	next, err := os.CreateTemp(filepath.Dir(path), ".config.toml.d1-agent-hook.*")
+	if err != nil {
+		return nil, "", err
+	}
+	defer os.Remove(next.Name())
+	if _, err := next.WriteString(kept); err != nil {
+		next.Close()
+		return nil, "", err
+	}
+	if err := next.Chmod(info.Mode().Perm()); err != nil {
+		next.Close()
+		return nil, "", err
+	}
+	if err := next.Close(); err != nil {
+		return nil, "", err
+	}
+	if err := os.Rename(next.Name(), path); err != nil {
+		return nil, "", err
+	}
+	return removed, backup, nil
+}
+
 // checkCodex reports: the requirements file root-owned, closed to other writes and exactly what
 // CodexRequirements prints; and ~/.codex/config.toml without the older sandbox settings.
 func checkCodex(config Config) []Line {
@@ -117,14 +212,7 @@ func checkCodex(config Config) []Line {
 	userConfig := filepath.Join(config.Home, ".codex", "config.toml")
 	var found []string
 	if user, err := os.ReadFile(userConfig); err == nil {
-		for _, line := range strings.Split(string(user), "\n") {
-			line = strings.TrimSpace(line)
-			for _, key := range legacySandboxKeys {
-				if strings.HasPrefix(line, key) {
-					found = append(found, line)
-				}
-			}
-		}
+		found = legacySandboxLines(string(user))
 	}
 	return append(lines, fact(len(found) == 0, "codex: "+userConfig+" sets none of the older sandbox settings, which a profile allowlist replaces"+listed(" (remove ", found)))
 }

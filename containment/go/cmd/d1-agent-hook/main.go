@@ -8,8 +8,10 @@
 //
 // The owner's commands, not hook rules: "d1-agent-hook settings" prints the block for
 // ~/.claude/settings.json; "d1-agent-hook codex-requirements" prints /etc/codex/requirements.toml
-// (hook/codex.go); "d1-agent-hook check" prints one OK or FAIL line per fact the install
-// rests on and exits 2 if any fails. check reports; it is not the boundary.
+// (hook/codex.go); "d1-agent-hook codex-config" takes the older sandbox settings out of
+// ~/.codex/config.toml, keeping the earlier file beside it; "d1-agent-hook check" prints one OK
+// or FAIL line per fact the install rests on and exits 2 if any fails. check reports; it is not
+// the boundary.
 package main
 
 import (
@@ -41,8 +43,11 @@ func main() {
 	if len(arguments) == 1 && arguments[0] == "codex-requirements" {
 		codexRequirements(config, configError)
 	}
+	if len(arguments) == 1 && arguments[0] == "codex-config" {
+		codexConfig(config, configError)
+	}
 	if len(arguments) > 0 {
-		block(fmt.Sprintf("unknown arguments %q: the hook takes none (settings, codex-requirements and check are the owner's commands)", arguments))
+		block(fmt.Sprintf("unknown arguments %q: the hook takes none (settings, codex-requirements, codex-config and check are the owner's commands)", arguments))
 	}
 	if configError != nil {
 		block(configError.Error())
@@ -104,6 +109,26 @@ func codexRequirements(config hook.Config, configError error) {
 		os.Exit(2)
 	}
 	fmt.Print(text)
+	os.Exit(0)
+}
+
+// codexConfig removes the older sandbox settings from ~/.codex/config.toml, says what it removed
+// and where the earlier file is, and exits.
+func codexConfig(config hook.Config, configError error) {
+	if configError != nil {
+		fmt.Fprintln(os.Stderr, gate.OneLine("d1-agent-hook codex-config: "+configError.Error()))
+		os.Exit(2)
+	}
+	removed, backup, err := hook.RemoveLegacySandbox(config)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, gate.OneLine("d1-agent-hook codex-config: "+err.Error()))
+		os.Exit(2)
+	}
+	if len(removed) == 0 {
+		fmt.Println("codex: ~/.codex/config.toml sets none of the older sandbox settings")
+	} else {
+		fmt.Println(gate.OneLine(fmt.Sprintf("codex: removed the older sandbox settings %q from ~/.codex/config.toml; the earlier file is kept at %s", removed, backup)))
+	}
 	os.Exit(0)
 }
 

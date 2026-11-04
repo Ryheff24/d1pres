@@ -166,7 +166,8 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
     `:workspace` and `:danger-full-access`, and uses profiles even where an older `-s` or
     `sandbox_mode` is given. **This applies to every Codex session on this Mac**; outside this
     repository `d1` is plain `:workspace`. `~/.codex/config.toml` must carry no `sandbox_mode` or
-    `[sandbox_workspace_write]` (the docs say to remove them; `check` reports one).
+    `[sandbox_workspace_write]` (the docs say to remove them; `check` reports one); `install.sh`
+    removes them (`d1-agent-hook codex-config`), keeping the earlier file beside it.
   - **Not worktrees, in Codex.** A worktree's copies (`.claude/worktrees/*`, `runs/wt-*`) have only
     the tripwire's spelling in Codex; the hook's `worktreeTarget` still refuses Edit and
     apply_patch there. b37deed gave them `read` glob keys (GPT 6.1 sol final review of PR 9,
