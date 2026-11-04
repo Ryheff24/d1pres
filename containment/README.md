@@ -160,7 +160,8 @@ that no agent or contained program can write. It lists the files here that diffe
 overwrites them with main's. It stops before writing anything if `containment/go` or
 `containment/c` holds a file main lacks, or any symbolic link (a linked `planted_test.go` was
 missed by `find -type f` and compiled by `go test ./...`; final review of PR 9, finding 6),
-because the build would use it. Then it runs the new
+because the build would use it. It compares those paths without case, as the volume does, so a
+planted `containment/Go/hook/x_test.go` stops it too (second review of PR 9, finding 5). Then it runs the new
 `install.sh`. With `check` it only reports. Its log is `runs/containment-update-*.log`.
 
 **Always `update.sh`, not `install.sh` (audit 2026-10-31, N4).** `install.sh` runs `go test ./...`
@@ -188,11 +189,13 @@ session on this Mac:** Codex then offers only profile `d1` (`:workspace` with th
 and trees read-only) and `:read-only`, so `--sandbox danger-full-access`, `--yolo` and the full
 access profile are refused in your other projects too. Remove `sandbox_mode` and
 `[sandbox_workspace_write]` from `~/.codex/config.toml` if you add them; `check` reports one. Then
-it runs Codex's own sandbox on probes: `runs/` and a worktree writable (the controls), then each
-protected path probed refused with "Operation not permitted", in the main checkout and in two
-worktrees it makes and removes (`runs/wt-codex-probe-PID`, `runs/WT-codex-probe-PID`), and a hard
-link to `CLAUDE.md` refused or not writable. Any FAIL stops the install; the probes write no bytes
-and remove only what they made. A new Codex session picks up the file. **Your `~/.codex/config.toml`
+it runs Codex's own sandbox on probes: `runs/` and each worktree writable (the controls), then
+each protected path probed refused with "Operation not permitted", in the main checkout and in two
+worktrees it makes and removes (`runs/wt-codex-probe.XXXXXX`, `runs/WT-codex-probe.XXXXXX`, named
+by `mktemp`), and a hard link to `CLAUDE.md` refused or not writable. Any FAIL stops the install,
+and so does a `runs/` that is a link. The probes write no bytes and remove only what they made;
+your terminal writes nothing at a path an agent could have planted a link at (second review of
+PR 9, findings 4 and 8). A new Codex session picks up the file. **Your `~/.codex/config.toml`
 has a `[sandbox_workspace_write]` table** (`writable_roots` for `drdabber/.derived`): `check` FAILs
 on it, and under the allowlist it no longer applies. To keep that root writable, it has to be
 added to profile `d1` in `hook/codex.go`: the allowlist refuses every other profile.
@@ -205,12 +208,16 @@ build cache (audit 2026-10-31, N5).
 
 `settings` prints one `hooks.PreToolUse` entry (matcher `Bash|Edit|Write|MultiEdit|NotebookEdit`,
 command `/usr/local/libexec/d1-agent/d1-agent-hook`), one `permissions.deny` Edit rule per
-protected file and one per protected tree (`Edit(/<root>/containment/go/**)` and the other three).
+protected file and one per protected tree (`Edit(/<root>/containment/go/**)` and the other three),
+and the same rules under each worktree pattern (`Edit(/<root>/runs/wt-*/CLAUDE.md)`, in the four
+spellings of `wt-`, and `.claude/worktrees/*`).
 `check` reports what it measured: the build's repository root; the directory and
 each binary root-owned, closed to other writes, with their modes; the hook and deny rules in your
 settings; each `sandbox.excludedCommands` entry one the hook knows; `/etc/codex/requirements.toml`
 root-owned and equal to what the hook prints, and `~/.codex/config.toml` without the older sandbox
-settings; each protected file present and each protected tree a directory.
+settings; each worktree git has registered inside `runs/wt-NAME` or `.claude/worktrees/NAME` (a
+FAIL for one elsewhere: move it with `git worktree move`); each protected file present and each
+protected tree a directory.
 It is a report, not the boundary. Rebuild and reinstall after any change under `containment/go`.
 Keep the macOS firewall on: for a server bound to 0.0.0.0 under `d1-localonly` it is the only
 control, because Seatbelt's `localhost` includes this Mac's own addresses, so the profile admits
@@ -225,9 +232,10 @@ overview|listen`) pass for every model only as `ProfilerForm` (`hook/profiler.go
 their own path, one line of literal words, listed options, this project's PIDs, no output files; a
 command naming one of your other excluded programs
 (`xcrun`, `xcodebuild`, `codesign`, `security`, `system_profiler`, `codex exec`, `copilot -p` never with `--allow-all*` or `--yolo`)
-passes only as that one command, heredoc and redirections allowed, no `#` comment, nothing chained; a command
+passes only as that one command, a heredoc allowed, no redirection into a file (only `/dev/null`,
+`2>&1` and reads) and no `codex -o`, no `#` comment, nothing chained; a command
 whose text names a protected file passes only as a pure read (no `; & > < $(` backquote, newline
-or `tee` outside quotes, no word starting with `#`, no `$'`, `$"`, `${` or unquoted `(`, every `|`
+or `tee` outside quotes, no word starting with `#`, no `$` but `$NAME` and `${PWD}`, no unquoted `(`, every `|`
 segment a reading program), a spelling-based tripwire that an excluded
 program run alone skips, so codex prompts may name those files; edits of the
 protected files (`gate.ProtectedFiles` and `~/.claude/settings.json`) are refused from any

@@ -25,13 +25,13 @@ func isCompanion(command string) bool {
 }
 
 // CompanionForm returns "" when command is node on companionScript, spelled out (no variables),
-// with one of companionCommands, run alone under the same shell rules as ExcludedForm, and every
-// file a redirection writes one redirectsInRepository admits. The plugin writes its job state under
+// with one of companionCommands, run alone under the same shell rules as ExcludedForm, and no
+// redirection that writes a file (redirectsWriteNoFile). The plugin writes its job state under
 // ~/.claude/plugins/data, so it runs with the sandbox off, and the shell opens a redirection before
 // node starts: "node .../codex-companion.mjs status > CLAUDE.md" truncated the file, because this
 // route returned before the tripwire and read no redirection (GPT 6.1 sol final review of PR 9,
 // finding 1). The tripwire itself stays off this route: a task prompt names protected files as data.
-func CompanionForm(command string, cwd string, config Config) string {
+func CompanionForm(command string) string {
 	line, rest := logicalLine(command)
 	delimiter, why := scanShell(line)
 	if why != "" {
@@ -48,7 +48,7 @@ func CompanionForm(command string, cwd string, config Config) string {
 		return why
 	}
 	_, redirects := shellArguments(line)
-	if why := redirectsInRepository(redirects, cwd, config); why != "" {
+	if why := redirectsWriteNoFile(redirects); why != "" {
 		return "the Codex plugin command: " + why
 	}
 	return ""
@@ -167,7 +167,7 @@ func ExcludedForm(command string, cwd string, config Config) string {
 	if why := Tripwire(line, config); why != "" {
 		return why
 	}
-	return redirectsInRepository(redirects, cwd, config)
+	return redirectsWriteNoFile(redirects)
 }
 
 // codexForm returns "" when codex exec's arguments (after "exec") leave its own sandbox and hook
@@ -268,9 +268,11 @@ func codexValue(option string, value string, cwd string, config Config) string {
 			return "codex -s " + value + " is not admitted; codex runs here as -s " + strings.Join(codexSandboxes, " or -s ")
 		}
 	case "output-last-message":
-		if why := outputInRepository(value, cwd, config); why != "" {
-			return "codex -o " + value + ": " + why
-		}
+		// codex writes this file itself, outside its own sandbox, when the run ends: a path checked
+		// now can be a link to a protected file by then (second review of PR 9, finding 3).
+		return "codex -o " + value + ": codex writes that file outside every sandbox when it ends, so what it opens " +
+			"cannot be held to what is checked now; the last message is on stdout, or use the Codex plugin " +
+			"(node .../codex-companion.mjs task, then result)"
 	case "cd", "add-dir":
 		if isPWD(value) {
 			value = cwd
@@ -325,18 +327,21 @@ func directoryInRepository(path string, cwd string, config Config) string {
 	return ""
 }
 
-// redirectsInRepository returns "" when every file a redirection writes is one an excluded program
-// may write: a literal path that outputInRepository admits, or /dev/null, /dev/stdout or
-// /dev/stderr. A redirection is opened by the shell, which the sandbox exclusion runs outside every
-// sandbox, so before this "codex exec - > $HOME/.zshrc" wrote where -o was refused (review of PR 9,
-// R2). Reading redirections, heredocs and descriptor merges write no file.
+// redirectsInRepository returns "" when no redirection writes a file: each one reads, merges a
+// descriptor, or writes /dev/null, /dev/stdout or /dev/stderr. A redirection is opened by the shell,
+// which the sandbox exclusion runs outside every sandbox, so no file may be its target:
 //
-// "$TMPDIR/NAME" is not admitted any more (GPT 6.1 sol final review of PR 9, finding 2): it was
-// checked by its spelling alone, so a link planted there first ("ln -s .../CLAUDE.m? $TMPDIR/x")
-// sent "xcodebuild -version > $TMPDIR/x" into a protected file, and the hook cannot know the value
-// $TMPDIR has in the shell that runs the command. A log goes in the repository (runs/NAME.log),
-// where outputInRepository resolves it as the kernel opens it.
-func redirectsInRepository(redirects []shellRedirect, cwd string, config Config) string {
+//   - "codex exec - > $HOME/.zshrc" wrote where -o was refused (review of PR 9, R2);
+//   - "$TMPDIR/NAME" was admitted by its spelling, so a link planted there sent
+//     "xcodebuild -version > $TMPDIR/x" into a protected file (final review of PR 9, finding 2);
+//   - a path in the repository was checked when the hook decided, and the shell opens it later: a
+//     second call that swaps runs/out.log for a link to CLAUDE.md in between ("ln -sf
+//     $PWD/CLAUDE.m? runs/out.log") truncates CLAUDE.md, and nothing binds the open to what was
+//     checked (second review of PR 9, finding 3). Output goes to stdout, which the harness keeps.
+//
+// The operator is read whole: zsh's ">!", ">>!", "&>!" and ">&!" (clobber) and bash's ">|" are
+// writes, and "!" or "|" is not part of a file name here (second review, finding 1).
+func redirectsWriteNoFile(redirects []shellRedirect) string {
 	for _, redirect := range redirects {
 		target := redirect.target
 		switch {
@@ -346,39 +351,10 @@ func redirectsInRepository(redirects []shellRedirect, cwd string, config Config)
 			continue
 		case target.literal && slices.Contains([]string{"/dev/null", "/dev/stdout", "/dev/stderr"}, target.text):
 			continue
-		case !target.literal:
-			return redirect.operator + " " + target.text + ": the file a redirection writes must be spelled out: the shell " +
-				"expands it outside every sandbox, and the hook cannot tell where it lands; write a log to runs/NAME.log"
 		}
-		if why := outputInRepository(target.text, cwd, config); why != "" {
-			return redirect.operator + " " + target.text + ": " + why
-		}
-	}
-	return ""
-}
-
-// outputInRepository returns "" when path is a file codex may write: inside the repository (codex
-// runs outside every sandbox, so nothing else holds it to one) and not a protected file.
-func outputInRepository(path string, cwd string, config Config) string {
-	readings, why := writeReadings(path, cwd)
-	if why != "" {
-		return why
-	}
-	if why := ProtectedTarget(path, cwd, config); why != "" {
-		return why
-	}
-	root, err := canonicalPath(config.Root)
-	if err != nil {
-		return "the repository root cannot be resolved"
-	}
-	for _, reading := range readings {
-		canonical, err := canonicalPath(reading)
-		if err != nil {
-			return err.Error()
-		}
-		if !underPath(canonical, root) {
-			return "a program the sandbox does not hold writes its output inside " + config.Root + ", nowhere else"
-		}
+		return redirect.operator + " " + target.text + ": a program outside the sandbox writes no file by redirection: " +
+			"the shell opens it after this check, so what it opens cannot be held to what was checked. Leave the output " +
+			"on stdout, or send it to /dev/null"
 	}
 	return ""
 }
@@ -430,11 +406,10 @@ func logicalLine(command string) (string, string) {
 //
 // It refuses what the tripwire's reader refuses (79418b3), on every line it reads and not only on
 // one that spells a protected name: an unquoted "(" (a subshell, bash's <(...) and >(...), zsh's
-// =(...) process substitution, a zsh glob qualifier *(e:...:)), "${" outside single quotes except
-// the owner's "${PWD}" (zsh's (e) flag runs what it holds), and "$'" or "$\"" outside quotes
-// (quoting by rules this does not read). Before this, "xcodebuild -version =(cp runs/p CLAUDE.m?)"
-// was admitted, and zsh ran the cp before xcodebuild started (GPT 6.1 sol final review of PR 9,
-// finding 3).
+// =(...) process substitution, a zsh glob qualifier *(e:...:)), and outside single quotes every
+// "$" but $NAME and ${PWD} (plainExpansion: "${(e)X}", "$'...'", "$[...]" and the rest). Before
+// this, "xcodebuild -version =(cp runs/p CLAUDE.m?)" was admitted, and zsh ran the cp before
+// xcodebuild started (GPT 6.1 sol final review of PR 9, finding 3).
 func scanShell(line string) (string, string) {
 	quote := byte(0)
 	delimiter := ""
@@ -447,10 +422,8 @@ func scanShell(line string) (string, string) {
 			}
 		case character == '`' || character == '\\' || character == '$' && next == '(':
 			return "", fmt.Sprintf("%q can run another command", string(character)+string(next))
-		case character == '$' && next == '{' && !strings.HasPrefix(line[index:], "${PWD}"):
-			return "", "\"${\" expands a parameter, and zsh's (e) flag runs what it holds; spell the value out"
-		case quote == 0 && character == '$' && (next == '\'' || next == '"'):
-			return "", fmt.Sprintf("%q quotes by rules this check does not read", string(character)+string(next))
+		case character == '$' && !plainExpansion(line[index:]):
+			return "", fmt.Sprintf("%q is an expansion this check does not read; only $NAME and ${PWD} are admitted", string(character)+string(next))
 		case quote == 0 && character == '(':
 			return "", "\"(\" starts a subshell, a process substitution (<(...), >(...), zsh's =(...)) or a zsh glob qualifier, which can run another command"
 		case quote == '"':
@@ -482,6 +455,23 @@ func scanShell(line string) (string, string) {
 		return "", "an unclosed quote"
 	}
 	return delimiter, ""
+}
+
+// plainExpansion reports whether text, which starts with "$", is "${PWD}" or "$NAME" (a letter or
+// "_", then letters, digits and "_") not followed by "[". Those expand to a value and run nothing.
+// Every other form is refused, rather than each one named: refusing "${", "$'" and "$\"" by name
+// left bash's "$[...]", whose single quotes are no quotes inside arithmetic, so
+// "xcodebuild -version $['$(cp runs/p CLAUDE.m?)']" ran the cp (second review of PR 9, finding 2).
+// "[" after a name is a subscript, which bash and zsh evaluate as arithmetic.
+func plainExpansion(text string) bool {
+	if strings.HasPrefix(text, "${PWD}") {
+		return true
+	}
+	end := 1
+	for end < len(text) && (text[end] == '_' || text[end] >= 'a' && text[end] <= 'z' || text[end] >= 'A' && text[end] <= 'Z' || end > 1 && isDigit(text[end])) {
+		end++
+	}
+	return end > 1 && (end == len(text) || text[end] != '[')
 }
 
 // shellWord is one word of a command as the program receives it: quotes removed, and literal false

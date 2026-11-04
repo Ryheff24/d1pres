@@ -308,7 +308,7 @@ func unsandboxedHarness(call event) bool {
 // sandbox-off rules are next.
 func decideInRepository(call event, command string, code string, config Config) (string, bool) {
 	if isCompanion(code) {
-		return CompanionForm(command, call.Cwd, config), true
+		return CompanionForm(command), true
 	}
 	if RoutesToProfiler(code) {
 		if why := ProfilerForm(command, config.Root); why != "" {
@@ -326,6 +326,9 @@ func decideInRepository(call event, command string, code string, config Config) 
 		return override + " would build or run a Rust test without the test gate that d1-server/.cargo/config.toml links in; every test runs inside the network sandbox (containment/agent-containment.md, Tests)", true
 	}
 	if why := runsTestsInSandbox(code, config); why != "" {
+		return why, true
+	}
+	if why := worktreeCommand(code, call.Cwd, config); why != "" {
 		return why, true
 	}
 	if tripped := Tripwire(command, config); tripped != "" {
@@ -362,30 +365,78 @@ func decideSandboxOff(call event, command string, config Config) string {
 // one counts, so "go test -c -c=false ./..." runs the tests; finding a "-c" anywhere admitted it
 // (GPT 6.1 sol final review of PR 9, finding 7). Arguments after -args go to the test binary. A -c
 // value that is not a boolean, or a -c spelled any other way, does not count as building only.
+//
+// Options are read by arity, as go and cargo read them (second review of PR 9, finding 7): in
+// "go test -o -c ./x" the -c is -o's value and the tests run, and in "go test -c -run -c=false"
+// the -c=false is -run's pattern and they only build. An option go test does not list is refused,
+// since how many words it takes cannot be told. For cargo, --no-run counts only before "--" (after
+// it the word goes to the test binary) and not as another option's value.
 func onlyBuilds(program string, arguments []string) bool {
 	if program == "cargo" {
-		return slices.Contains(arguments, "--no-run")
+		return cargoOnlyBuilds(arguments)
 	}
 	builds := false
-	for _, argument := range arguments {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
 		if argument == "-args" || argument == "--args" {
 			break
 		}
-		name, value, hasValue := strings.Cut(strings.TrimPrefix(argument, "-"), "=")
-		if !strings.HasPrefix(argument, "-") || name != "c" && name != "-c" {
+		if !strings.HasPrefix(argument, "-") || argument == "-" {
 			continue
 		}
-		if !hasValue {
-			builds = true
-			continue
-		}
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(argument, "-"), "-"), "=")
+		switch {
+		case slices.Contains(goTestValueFlags, name):
+			if !hasValue {
+				index++
+			}
+		case slices.Contains(goTestBoolFlags, name):
+			parsed := true
+			if hasValue {
+				var err error
+				if parsed, err = strconv.ParseBool(value); err != nil {
+					return false
+				}
+			}
+			if name == "c" {
+				builds = parsed
+			}
+		default:
 			return false
 		}
-		builds = parsed
 	}
 	return builds
+}
+
+// goTestValueFlags and goTestBoolFlags are go test's options ("go help testflag", "go help build"),
+// by whether they take a value.
+var goTestValueFlags = []string{"C", "o", "p", "asmflags", "buildmode", "compiler", "gccgoflags", "gcflags", "installsuffix",
+	"ldflags", "mod", "modfile", "overlay", "pgo", "pkgdir", "tags", "toolexec", "exec", "covermode", "coverpkg",
+	"coverprofile", "bench", "benchtime", "blockprofile", "blockprofilerate", "count", "cpu", "cpuprofile", "fuzz",
+	"fuzztime", "fuzzminimizetime", "list", "memprofile", "memprofilerate", "mutexprofile", "mutexprofilefraction",
+	"outputdir", "parallel", "run", "skip", "shuffle", "timeout", "trace", "vet"}
+var goTestBoolFlags = []string{"c", "a", "n", "x", "v", "i", "work", "race", "msan", "asan", "cover", "json", "failfast",
+	"short", "benchmem", "fullpath", "trimpath", "linkshared", "buildvcs", "modcacherw"}
+
+// cargoValueFlags are cargo test's options that take the next word as their value (cargo-test(1)).
+var cargoValueFlags = []string{"--package", "-p", "--manifest-path", "--test", "--bin", "--example", "--bench", "--features",
+	"-F", "--target", "--target-dir", "--jobs", "-j", "--profile", "--exclude", "--color", "--message-format", "-Z",
+	"--config", "--lockfile-path", "--partition"}
+
+// cargoOnlyBuilds reports whether cargo's own arguments, before "--", hold --no-run as an option.
+func cargoOnlyBuilds(arguments []string) bool {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		switch {
+		case argument == "--":
+			return false
+		case argument == "--no-run":
+			return true
+		case slices.Contains(cargoValueFlags, argument):
+			index++
+		}
+	}
+	return false
 }
 
 // runsTestsInSandbox returns "" unless command would run tests in the agent's own sandbox, where
@@ -437,7 +488,7 @@ func commandSegments(command string) []string {
 // and command wrappers skipped) that matches, or "". A tripwire: it is spelling-based.
 func firstWordMatching(command string, matches func(string) bool) string {
 	for _, segment := range commandSegments(command) {
-		words := strings.Fields(segment)
+		words := unquoted(strings.Fields(segment))
 		for _, candidate := range [][]string{skipAssignments(words), commandWords(words)} {
 			if len(candidate) > 0 && matches(candidate[0]) {
 				return candidate[0]
@@ -445,6 +496,17 @@ func firstWordMatching(command string, matches func(string) bool) string {
 		}
 	}
 	return ""
+}
+
+// unquoted is words with every quote mark and backslash removed, as the shell removes them from a
+// program's name: only the marks around a word were removed, so go te""st was not go test and
+// ran the tests (second review of PR 9, finding 7), and d1-re""comp was not a game binary.
+func unquoted(words []string) []string {
+	clean := make([]string, len(words))
+	for index, word := range words {
+		clean[index] = strings.NewReplacer("'", "", "\"", "", "\\", "").Replace(word)
+	}
+	return clean
 }
 
 // skipAssignments is words without the NAME=value assignments in front.
@@ -489,11 +551,7 @@ var commandWrappers = map[string]commandWrapper{
 // each word removed, then assignments and the wrappers in commandWrappers (with their options and
 // arguments) skipped, as often as they nest. The program's own name stays as spelled, path and all.
 func commandWords(words []string) []string {
-	trimmed := make([]string, len(words))
-	for index, word := range words {
-		trimmed[index] = strings.Trim(word, `'"`)
-	}
-	words = trimmed
+	words = unquoted(words)
 	for {
 		words = skipAssignments(words)
 		if len(words) == 0 {

@@ -99,6 +99,11 @@ on it. A test that needs a socket fails, visibly, and gets an in-memory transpor
   `go test` and `cargo test` (`bench`, `nextest` and cargo's `t` included) are refused unless they
   only build (`-c`, `--no-run`), and the refusal prints the two commands above. For go the last
   `-c` counts, as go reads it: `go test -c -c=false ./...` runs the tests and is refused (final
+  review of PR 9, finding 7). Options are read by their arity, from go 1.26's and cargo's own
+  lists: a value option takes the next word, so `go test -o -c ./x` writes a binary named `-c` and
+  runs the tests (refused) and `go test -c -run -c=false ./x` only builds (admitted); a go option
+  in neither list is refused; cargo's `--no-run` counts only before `--`. Quote marks and
+  backslashes are removed from the program's words first, so `go te''st` is `go test` (second
   review of PR 9, finding 7). Before this only a
   sandbox-off test run was refused, so the common case — a plain `go test ./...` inside the sandbox,
   where loopback is open and egress goes through the proxy — passed, and the owner's rule held in
@@ -135,7 +140,13 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
   repository-relative name is a protected file, or is inside a protected tree, is refused (N6). A
   worktree holds its own `d1-recomp/src/main.rs` and `build.rs`, which is where the gate is called.
   The worktree directories match without case, as the volume does: `RUNS/wt-x` and `runs/WT-x` are
-  `runs/wt-x` (review of PR 9, R3).
+  `runs/wt-x` (review of PR 9, R3). Every worktree git has registered (`.git/worktrees/*/gitdir`)
+  counts as well, wherever it is: one at `runs/review` matched no pattern (second review of PR 9,
+  finding 6). `git worktree add` and `git worktree move` may only target a spelled-out
+  `runs/wt-NAME` or `.claude/worktrees/NAME` (resolved against `-C` and the session's directory;
+  no expansion, no `..`), the two places the Codex profile and Claude Code's deny rules cover, and
+  `check` FAILs on a registered worktree anywhere else. That rule reads the command's spelling: a
+  script that runs git is not seen, which is what the check is for.
 - **The three places they are enforced:** the hook refuses the edit tools and `apply_patch`
   (`ProtectedTarget`), `local.sb` denies writes to each (and to every directory above one as an
   exact path, so a rename cannot get around a file rule), and `~/.claude/settings.json` carries one
@@ -164,22 +175,35 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
     `d1preservation/.codex/hooks.json` by its path). The docs support read globs on macOS.
   - `install.sh` measures it with `codex sandbox macos -P d1 --include-managed-config`, each probe
     opening a path for appending and writing no bytes, a refusal counting only as "Operation not
-    permitted": the controls (`runs/` writable, a worktree writable as its own root), then
-    `CLAUDE.md`, `containment/install.sh`, the absent `.cargo/config.toml`, a new file in each
-    tree, and in two worktrees it makes (`wt-` and `WT-`) their `CLAUDE.md` and `containment/go`,
-    with Codex started in the repository and in the worktree. A probe removes only what it created
-    (a dangling link already there stays; finding 9). Hard links (finding 8): a link to an
-    unprotected file is the control; a link to `CLAUDE.md` must be refused, or made and refused
-    when opened for writing. Any FAIL stops the install. `check` reports the file root-owned and
-    equal to what the hook prints.
+    permitted": the controls (`runs/` writable, each worktree writable from the repository and as
+    its own root), then `CLAUDE.md`, `containment/install.sh`, the absent `.cargo/config.toml`, a
+    new file in each tree, and in two worktrees it makes (`wt-` and `WT-`) their `CLAUDE.md` and
+    `containment/go`, with Codex started in the repository and in the worktree. A probe removes
+    only what it created (a dangling link already there stays; finding 9). Hard links (finding 8):
+    a link to a file in the install's private directory is the control; a link to `CLAUDE.md` must
+    be refused, or made (and then the same file as `CLAUDE.md`) and refused when opened for
+    writing. Any FAIL stops the install. `check` reports the file root-owned and equal to what the
+    hook prints.
+  - **The owner's terminal writes nothing an agent can redirect** (second review of PR 9, findings
+    4 and 8). `runs/` must be a plain directory, not a link. Every probe directory is new from
+    `mktemp` (no guessable name); the files the worktree probes aim at are made under noclobber;
+    links and removals inside the repository run under profile `d1` itself; `ln -n` fails on a link
+    planted at its name instead of linking into the directory it points to; and the whole of each
+    probe directory goes with `rm -rf`, which does not follow links. 65cfb10's probe ran
+    `: > runs/.codex-link-source-PID` in the owner's terminal, which truncated whatever a planted
+    link there pointed to.
   - **Not measured yet:** how Codex maps the plugin's `sandbox: "workspace-write"` request under
     the allowlist (the docs say it falls back to an allowed value); a protected file that does not
     exist yet, created in another case (`agents.md` for an absent `AGENTS.md`), which a literal or
     glob rule may not match; and renaming a parent directory. Agents cannot run `codex sandbox`
     (the hook refuses it), so the first measurement is the owner's install.
-  - **Open in Claude Code:** `~/.claude/settings.json`'s deny rules name the main checkout only,
-    so a sandboxed Bash write into a worktree's copy (`cp x runs/wt-demo/CLAUDE.m?`) is stopped by
-    nothing but the tripwire's spelling. The edit tools are refused there (`worktreeTarget`).
+  - **Claude Code's worktrees** (second review of PR 9, finding 6): `~/.claude/settings.json` gets
+    the same worktree rules as globs, one Edit deny rule per protected file and per tree under each
+    of `.claude/worktrees/*` and the four spellings of `runs/wt-*`, so a sandboxed Bash write into
+    a worktree's copy (`cp x runs/wt-demo/CLAUDE.m?`) is refused by the sandbox, not only by the
+    tripwire's spelling. **Not measured yet:** that Claude Code turns a glob deny rule into a
+    sandbox write denial as it does a literal one; the first measurement is a session after the
+    owner's install.
 - **Reading them is normal.** The tripwire refuses only a command that is not a pure read, and it
   reads the line as bash reads it: a quoted or escaped `|` is text, `2>&1` writes no file, `tee` is
   matched as the program a segment runs, not inside `steering` and not as an operand
@@ -191,13 +215,16 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
   `#` (a comment, so a quote after it is none and the next line runs), `$'` and `$"`, `${` (zsh's
   `(e)` flag runs what it holds), an unquoted `(` (subshell, `=(...)`, zsh glob qualifier
   `*(e:...:)`), and `>&WORD` unless WORD is a descriptor or `-` (`>&1/../CLAUDE.md` writes a file).
+  Of `$` it admits only `$NAME` and `${PWD}`: zsh's `$[...]` is arithmetic that runs a `$(...)`
+  inside it, and `$X[...]` is a subscript (second review of PR 9, finding 2).
   It stays a tripwire: `cp x CLAUDE.m?` spells no name and passes, which is why it is not the lock.
 - **How a write path is read:** twice, and either reading refuses. Once with `.` and `..` removed
   by name, once as the kernel opens it, a link resolved before the `..` after it: with
   `x -> containment/go/hook`, `x/../hook/p_test.go` is `containment/go/hook/p_test.go` to the
   kernel and `hook/p_test.go` by name. An existing file with more than one name (a hard link) is
   refused, since writing it writes every name it has. This holds for the edit tools,
-  `apply_patch`, codex's `-o`, `-C` and `--add-dir`, and an excluded program's redirections.
+  `apply_patch`, and codex's `-C` and `--add-dir`. Codex's `-o` and a file redirection on a route
+  outside the sandbox are refused outright, not checked (below).
 - **Changing one:** show the owner the change, or write a complete file under the scratchpad window
   directory the owner opens in their editor (point 5 below). Never a diff.
 
@@ -247,7 +274,7 @@ Elevated models: `gpt-6.1-sol`, `gpt-6-astra`, `claude-opus-5-5`, `claude-sonnet
 | Running tests (cargo and Go test binaries) | yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run) | yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run) | runsTestsInSandbox, LauncherForm (hook.go); the test gate in each binary |
 | Servers and other programs that listen | yes: only under d1-localonly, sandbox off, never a game binary or a test | yes: only under d1-localonly, sandbox off, never a game binary or a test | LauncherForm (hook.go) |
 | Codex through the plugin's companion script | yes: setup, task, status, result, cancel, alone; no reviews | yes: setup, task, status, result, cancel, alone; no reviews | CompanionForm (shell.go) |
-| The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, codex exec | yes: alone, and the line itself goes through the tripwire (they run outside the sandbox, so a redirection or -o could write a protected file); codex only with its own sandbox left on | no | decideBash (hook.go), ExcludedForm, codexForm (shell.go) |
+| The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, codex exec | yes: alone, the line through the tripwire, no redirection into a file and no codex -o (they run outside the sandbox, so the file would be opened after the check); codex only with its own sandbox left on | no | decideBash (hook.go), ExcludedForm, codexForm (shell.go) |
 | copilot (its pinned path no longer exists, it has no sandbox of its own, and --allow-tool shell grants what --allow-all was refused for) | no | no | ExcludedForm (shell.go) |
 | Read-only logs and profilers: log show and stream, xctrace export and list, sample, vmmap, footprint, malloc_history, metalperftrace overview and listen | yes: at its own path, alone, one line of plain words or '...' text, listed options only, this project's processes by PID and files in the repository only, no output files | yes: at its own path, alone, one line of plain words or '...' text, listed options only, this project's processes by PID and files in the repository only, no output files | ProfilerForm, profilerSpecs (profiler.go) |
 | security (also sandbox-excluded) | yes: find-identity only | no | ExcludedForm (shell.go) |
@@ -331,26 +358,30 @@ decides it per call (`containment/go/hook/elevated.go`). The ids and the dates a
   - The arguments are checked as the program receives them, quotes removed (`shellArguments`).
     Before, `'--dangerously-bypass-approvals-and-sandbox'` in quotes and `-sdanger-full-access`
     attached were admitted (review of PR 9, R1).
-  - A redirection writes outside every sandbox, so its file is a spelled-out path inside the
-    repository that is not protected, or `/dev/null`/`stdout`/`stderr`. `codex exec - > $HOME/.zshrc`
-    was admitted before (R2's sibling). `$TMPDIR/NAME` is refused since the final review of PR 9
-    (finding 2): it was admitted by its spelling, so a link planted there first sent
-    `xcodebuild -version > $TMPDIR/x` into a protected file. The owner's codex log goes to
-    `runs/codex.log` instead of `"$TMPDIR/codex.log"`.
+  - **No redirection into a file** (second review of PR 9, findings 1 and 3). The shell opens a
+    redirection's file after this check, outside every sandbox, so a link swapped in between (an
+    agent can write `runs/` and `docs/`) sent the write into a protected file; checking the path
+    first cannot close that race. Admitted: `<` (a read), `2>&1`, `>&2`, `2>&-`, and `/dev/null`,
+    `/dev/stdout`, `/dev/stderr`. Every other target is refused, in every spelling (`>`, `>>`,
+    `>|`, zsh's `>!`, `>>!`, `&>!`, `<>`). The output stays on stdout, which the session reads.
+    Before: `codex exec - > $HOME/.zshrc` (R2's sibling), `$TMPDIR/NAME` by its spelling (final
+    review, finding 2), and `>!CLAUDE.md`, read as `>` and a file named `!CLAUDE.md`.
   - The line is read under one grammar, whether or not it spells a protected name (finding 3): an
     unquoted `(` (a subshell, `<(...)`, `>(...)`, zsh's `=(...)`, a glob qualifier), `${` outside
     single quotes except `"${PWD}"`, and `$'` or `$"` are refused, as the tripwire's reader refuses
     them. `xcodebuild -version =(cp runs/p CLAUDE.m?)` was admitted, and zsh ran the `cp` first.
   - The Codex plugin's companion command runs with the sandbox off (it writes its job state under
-    `~/.claude/plugins/data`), and its redirections are held to the same place (finding 1):
+    `~/.claude/plugins/data`), and it writes no file by redirection either (final review,
+    finding 1; second review, finding 1):
     `node .../codex-companion.mjs status > CLAUDE.md` truncated the file, because that route skipped
     the tripwire and read no redirection. The tripwire stays off it, since a task prompt names
     protected files as data.
   - `codex` keeps its own sandbox and its hook trust (N3): `--dangerously-*` and `--yolo` are
     refused, `-s` is `read-only` or `workspace-write`, `-c`/`--config` only takes the keys in
     `codexConfigKeys` (so never `sandbox_mode=danger-full-access`; `--enable`/`--disable` are
-    `-c features.NAME` and refused), `-o`/`--output-last-message` writes only a path inside the
-    repository that is not protected, and `-C`/`--cd` and `--add-dir`, which workspace-write lets it
+    `-c features.NAME` and refused), `-o`/`--output-last-message` is refused (codex opens that
+    file outside every sandbox when it ends, the same race as a redirection; the last message is on
+    stdout, and the plugin's `result` returns it), and `-C`/`--cd` and `--add-dir`, which workspace-write lets it
     write, stay inside the repository and out of `.git` and the protected trees: codex keeps only a
     writable root's own `.git` read-only, so `--add-dir .git` or `--add-dir .claude/hooks` made one
     a root with nothing read-only in it. Options are read as clap reads them (`-sVALUE`, `-s=VALUE`,

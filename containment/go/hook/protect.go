@@ -231,6 +231,7 @@ func worktreeTarget(canonical string, config Config) string {
 	if err != nil {
 		return ""
 	}
+	var candidates [][]string
 	for _, parent := range worktreeRoots {
 		prefix := filepath.Join(root, parent) + string(filepath.Separator)
 		if !hasPrefixFold(canonical, prefix) {
@@ -240,6 +241,16 @@ func worktreeTarget(canonical string, config Config) string {
 		if len(rest) < 2 || parent == "runs" && !hasPrefixFold(rest[0], "wt-") {
 			continue
 		}
+		candidates = append(candidates, rest)
+	}
+	// Every worktree git has registered counts too, wherever it is (second review of PR 9, finding
+	// 6: a worktree at runs/review matched no pattern).
+	for _, worktree := range RegisteredWorktrees(config) {
+		if real, err := canonicalPath(worktree); err == nil && hasPrefixFold(canonical, real+string(filepath.Separator)) {
+			candidates = append(candidates, append([]string{filepath.Base(real)}, strings.Split(canonical[len(real)+1:], string(filepath.Separator))...))
+		}
+	}
+	for _, rest := range candidates {
 		relative := strings.Join(rest[1:], "/")
 		for _, name := range gate.ProtectedFiles {
 			if strings.EqualFold(relative, name) {
@@ -256,6 +267,111 @@ func worktreeTarget(canonical string, config Config) string {
 		}
 	}
 	return ""
+}
+
+// gitGlobalValues are git's global options that take the next word as their value.
+var gitGlobalValues = []string{"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env", "--super-prefix"}
+
+// worktreeAddValues are the options of git worktree add that take the next word as their value.
+var worktreeAddValues = []string{"-b", "-B", "--reason"}
+
+// worktreeCommand returns "" unless command runs git worktree add or move with a destination that
+// is not where worktreeRoots puts a worktree, then why it is refused. The patterns (codex.go's glob
+// keys, the settings' deny rules) cover only <root>/.claude/worktrees/NAME and <root>/runs/wt-NAME,
+// so a worktree anywhere else held its own CLAUDE.md, gate call sites and containment sources with
+// nothing but the tripwire's spelling over them (second review of PR 9, finding 6). A destination
+// with an expansion is refused: where it lands cannot be told. Spelling-based, like the tripwire: a
+// script or alias that runs git is not seen, and check reports a worktree registered elsewhere.
+func worktreeCommand(command string, cwd string, config Config) string {
+	root, err := canonicalPath(config.Root)
+	if err != nil {
+		return ""
+	}
+	for _, segment := range commandSegments(command) {
+		words := commandWords(strings.Fields(segment))
+		if len(words) == 0 || filepath.Base(words[0]) != "git" {
+			continue
+		}
+		base := cwd
+		index := 1
+		for index < len(words) && strings.HasPrefix(words[index], "-") {
+			if slices.Contains(gitGlobalValues, words[index]) && index+1 < len(words) {
+				if words[index] == "-C" {
+					base = resolveAgainst(words[index+1], base)
+				}
+				index++
+			}
+			index++
+		}
+		if index+1 >= len(words) || words[index] != "worktree" || words[index+1] != "add" && words[index+1] != "move" {
+			continue
+		}
+		subcommand := words[index+1]
+		var positional []string
+		for position := index + 2; position < len(words); position++ {
+			word := words[position]
+			if subcommand == "add" && slices.Contains(worktreeAddValues, word) {
+				position++
+				continue
+			}
+			if strings.HasPrefix(word, "-") && word != "-" {
+				continue
+			}
+			positional = append(positional, word)
+		}
+		want := 0
+		if subcommand == "move" {
+			want = 1
+		}
+		if len(positional) <= want {
+			continue
+		}
+		destination := positional[want]
+		// ".." is refused too: canonicalPath cleans it before a link under it is followed, and git
+		// does not, so runs/link/../wt-x would be read as runs/wt-x and made beside the link's target.
+		if strings.ContainsAny(destination, "$~*?[]{}`") || slices.Contains(strings.Split(filepath.ToSlash(destination), "/"), "..") {
+			return "git worktree " + subcommand + " " + destination + ": the destination must be spelled out, as " +
+				filepath.Join(config.Root, "runs", "wt-NAME") + " or " + filepath.Join(config.Root, ".claude", "worktrees", "NAME")
+		}
+		resolved, err := canonicalPath(resolveAgainst(destination, base))
+		if err != nil || !inWorktreePattern(resolved, root) {
+			return "git worktree " + subcommand + " " + destination + ": a worktree goes in " + filepath.Join(config.Root, "runs", "wt-NAME") +
+				" or " + filepath.Join(config.Root, ".claude", "worktrees", "NAME") + ", where its protected copies are kept read-only " +
+				"(containment/agent-containment.md, Protected files and trees)"
+		}
+	}
+	return ""
+}
+
+// resolveAgainst is path made absolute against base, uncleaned.
+func resolveAgainst(path string, base string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return base + string(filepath.Separator) + path
+}
+
+// RegisteredWorktrees are the directories of every worktree git has registered for this
+// repository, read from .git/worktrees/*/gitdir (each holds the path of its worktree's .git file).
+// One git cannot read is left out; worktreeTarget's patterns still hold for it.
+func RegisteredWorktrees(config Config) []string {
+	files, _ := filepath.Glob(filepath.Join(config.Root, ".git", "worktrees", "*", "gitdir"))
+	var worktrees []string
+	for _, file := range files {
+		text, err := os.ReadFile(file)
+		if path := strings.TrimSpace(string(text)); err == nil && filepath.IsAbs(path) {
+			worktrees = append(worktrees, filepath.Dir(path))
+		}
+	}
+	return worktrees
+}
+
+// inWorktreePattern reports whether path, absolute and resolved, is a worktree directory where
+// worktreeRoots puts one: <root>/.claude/worktrees/NAME or <root>/runs/wt-NAME, without case.
+func inWorktreePattern(path string, root string) bool {
+	parent, name := filepath.Dir(path), filepath.Base(path)
+	return strings.EqualFold(parent, filepath.Join(root, ".claude", "worktrees")) ||
+		strings.EqualFold(parent, filepath.Join(root, "runs")) && hasPrefixFold(name, "wt-") && len(name) > 3
 }
 
 // canonicalPath is path with its deepest existing part resolved (symbolic links followed) and the

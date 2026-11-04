@@ -30,7 +30,10 @@ func Settings(config Config) map[string]any {
 
 // denyRules is one Edit rule per protected path, and one per protected tree, which Claude Code
 // reads as a gitignore-style pattern (so it also denies Bash writes under the tree in the agent's
-// own sandbox).
+// own sandbox). Each worktree pattern (codexWorktreePatterns) gets the same rules, as globs, so a
+// worktree's CLAUDE.md, gate call sites and containment sources are denied to Claude Code's tools
+// as the main checkout's are (second review of PR 9, finding 6). A worktree outside the patterns is
+// refused at git worktree add and move, and reported by check.
 func denyRules(config Config) []string {
 	var rules []string
 	for _, path := range ProtectedPaths(config) {
@@ -39,7 +42,40 @@ func denyRules(config Config) []string {
 	for _, path := range ProtectedTreePaths(config) {
 		rules = append(rules, "Edit(/"+path+"/**)")
 	}
+	for _, pattern := range codexWorktreePatterns {
+		base := filepath.Join(config.Root, pattern)
+		for _, name := range gate.ProtectedFiles {
+			rules = append(rules, "Edit(/"+filepath.Join(base, name)+")")
+		}
+		for _, tree := range gate.ProtectedTrees {
+			rules = append(rules, "Edit(/"+filepath.Join(base, tree)+"/**)")
+		}
+	}
 	return rules
+}
+
+// checkWorktrees reports each worktree git has registered: inside the patterns the Codex
+// requirements and the deny rules cover, or not. One outside them has only the hook's
+// RegisteredWorktrees check over its protected copies, and none from Codex's profile.
+func checkWorktrees(config Config) []Line {
+	root, err := canonicalPath(config.Root)
+	if err != nil {
+		return []Line{fact(false, "worktrees: the root cannot be resolved ("+err.Error()+")")}
+	}
+	var lines []Line
+	for _, worktree := range RegisteredWorktrees(config) {
+		resolved, err := canonicalPath(worktree)
+		if err != nil {
+			continue
+		}
+		inside := inWorktreePattern(resolved, root)
+		text := "worktree: " + worktree + " is inside runs/wt-NAME or .claude/worktrees/NAME, where its protected copies are read-only"
+		if !inside {
+			text = "worktree: " + worktree + " is outside runs/wt-NAME and .claude/worktrees/NAME, so Codex's profile and Claude Code's deny rules do not cover its protected copies; move it with git worktree move"
+		}
+		lines = append(lines, fact(inside, text))
+	}
+	return lines
 }
 
 // Line is one fact Check measured: OK or not, and what it says.
@@ -65,6 +101,7 @@ func Check(config Config) []Line {
 	}
 	lines = append(lines, checkSettings(config)...)
 	lines = append(lines, checkCodex(config)...)
+	lines = append(lines, checkWorktrees(config)...)
 	for _, name := range gate.ProtectedFiles {
 		_, err := os.Stat(filepath.Join(config.Root, name))
 		optional := slices.Contains(optionalFiles, name)

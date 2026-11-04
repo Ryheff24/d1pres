@@ -3,6 +3,8 @@ package hook
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -30,8 +32,9 @@ func TestContainmentRegression(t *testing.T) {
 		// changed here: an unresolved expansion must not count as a literal path
 		// in the repository, whatever the actual session's HOME happens to be.
 		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
-			{"relative_output_control", "codex exec -s read-only -o docs/result.md -", false},
-			{"quoted_output_control", "codex exec -s read-only -o 'docs/result with spaces.md' -", false},
+			{"relative_output", "codex exec -s read-only -o docs/result.md -", true},
+			{"quoted_output", "codex exec -s read-only -o 'docs/result with spaces.md' -", true},
+			{"stdout_control", "codex exec -s read-only -", false},
 			{"outside_output_control", "codex exec -s read-only -o " + filepath.Join(config.Home, "result.md") + " -", true},
 			{"expanded_home", "codex exec -s read-only -o $HOME/.zshrc -", true},
 		})
@@ -103,7 +106,8 @@ func TestContainmentRegression(t *testing.T) {
 		config := fakeTree(t)
 		outside := filepath.Join(config.Home, "result.md")
 		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
-			{"owner_codex_pattern_control", "codex exec -m gpt-6.1-sol -c model_reasoning_effort='\"high\"' -s read-only -C \"$PWD\" --color never -o docs/r.md - <<'EOF' > runs/codex.log 2>&1\ntask\nEOF", false},
+			{"owner_codex_pattern_control", "codex exec -m gpt-6.1-sol -c model_reasoning_effort='\"high\"' -s read-only -C \"$PWD\" --color never - <<'EOF' 2>&1\ntask\nEOF", false},
+			{"owner_codex_pattern_with_files", "codex exec -m gpt-6.1-sol -s read-only -C \"$PWD\" -o docs/r.md - <<'EOF' > runs/codex.log 2>&1\ntask\nEOF", true},
 			{"clustered_sandbox", "codex exec -hsdanger-full-access -", true},
 			{"equals_sandbox", "codex exec -s=danger-full-access -", true},
 			{"long_equals_sandbox", "codex exec --sandbox=danger-full-access -", true},
@@ -116,7 +120,8 @@ func TestContainmentRegression(t *testing.T) {
 			{"add_dir_home", "codex exec -s workspace-write --add-dir ~ -", true},
 			{"redirect_home", "codex exec -s read-only - > $HOME/.zshrc", true},
 			{"redirect_outside", "codex exec -s read-only - > " + outside, true},
-			{"redirect_inside_control", "codex exec -s read-only - > docs/out.md 2>&1", false},
+			{"redirect_inside", "codex exec -s read-only - > docs/out.md 2>&1", true},
+			{"redirect_codex_null_control", "codex exec -s read-only - > /dev/null 2>&1", false},
 			{"redirect_null_control", "xcodebuild -version > /dev/null", false},
 			{"redirect_temporary_escape", "codex exec -s read-only - > $TMPDIR/../x", true},
 			{"wrapped_game", "nice -n 5 d1-recomp run", true},
@@ -179,8 +184,9 @@ func TestSecurityReviewPR9(t *testing.T) {
 			{"output_through_link", "codex exec -s read-only -o x/../hook/p_test.go -", true},
 			{"redirect_through_link", "codex exec -s read-only - > x/../hook/q_test.go", true},
 			{"add_dir_through_link", "codex exec -s workspace-write --add-dir x/.. -", true},
-			{"output_control", "codex exec -s read-only -o docs/r.md -", false},
-			{"output_parent_control", "codex exec -s read-only -o docs/../r.md -", false},
+			{"output_inside", "codex exec -s read-only -o docs/r.md -", true},
+			{"output_parent", "codex exec -s read-only -o docs/../r.md -", true},
+			{"stdout_control", "codex exec -s read-only -", false},
 		})
 		for _, tool := range []string{"Edit", "Write", "apply_patch"} {
 			t.Run(tool, func(t *testing.T) {
@@ -215,7 +221,8 @@ func TestSecurityReviewPR9(t *testing.T) {
 		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
 			{"output_hard_link", "codex exec -s read-only -o docs/linked.go -", true},
 			{"redirect_hard_link", "codex exec -s read-only - > docs/linked.go", true},
-			{"output_single_name_control", "codex exec -s read-only -o docs/x.md -", false},
+			{"output_single_name", "codex exec -s read-only -o docs/x.md -", true},
+			{"stdout_control", "codex exec -s read-only -", false},
 		})
 		for _, tool := range []string{"Edit", "Write", "apply_patch"} {
 			t.Run(tool, func(t *testing.T) {
@@ -263,7 +270,8 @@ func TestFinalReviewPR9(t *testing.T) {
 					{"outside_repository", companion + " status > $HOME/.zshrc", true},
 					{"temporary_spelling", companion + " status > \"$TMPDIR/x\"", true},
 					{"null_control", companion + " status > /dev/null 2>&1", false},
-					{"inside_control", companion + " result x > docs/review.md", false},
+					{"inside_repository", companion + " result x > docs/review.md", true},
+					{"stdout_control", companion + " result x", false},
 					{"prompt_names_files_control", companion + " task 'review CLAUDE.md (and its hooks) for ${bugs} > here'", false},
 				})
 			})
@@ -282,7 +290,8 @@ func TestFinalReviewPR9(t *testing.T) {
 			{"temporary_quoted", "xcodebuild -version > \"$TMPDIR/codex.log\" 2>&1", true},
 			{"temporary_braced", "xcodebuild -version > ${TMPDIR}/x", true},
 			{"planted_link_in_runs", "xcodebuild -version > runs/planted", true},
-			{"runs_log_control", "xcodebuild -version > runs/x.log 2>&1", false},
+			{"runs_log", "xcodebuild -version > runs/x.log 2>&1", true},
+			{"null_control", "xcodebuild -version > /dev/null 2>&1", false},
 		})
 	})
 
@@ -330,6 +339,148 @@ func TestFinalReviewPR9(t *testing.T) {
 			{"tee_behind_xargs", "echo x | xargs tee CLAUDE.md", true},
 			{"grep_tee_control", "grep -n tee CLAUDE.md", false},
 			{"grep_tee_path_control", "grep -rn /usr/bin/tee containment/go", false},
+		})
+	})
+}
+
+// TestSecondReviewPR9 covers GPT 6.1 sol's second review of PR 9 (2026-11-03,
+// containment/reviews/REVIEW-gpt-6.1-sol-pr9-second-2026-11-03.md), findings 1, 2, 3, 6 and 7
+// (4, 5 and 8 are install.sh and update.sh). Each unsafe case has an admitted control of the same
+// shape. Event data only; no shell, git or codex runs.
+func TestSecondReviewPR9(t *testing.T) {
+	companion := "node /Users/ryanheffernan/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs"
+
+	// Finding 1: zsh's ">!" (and ">>!", "&>!") was read as ">" and a file named "!CLAUDE.md".
+	t.Run("ClobberRedirect", func(t *testing.T) {
+		config := fakeTree(t)
+		for _, sandboxOff := range []bool{true, false} {
+			t.Run(map[bool]string{true: "sandbox_off", false: "sandboxed"}[sandboxOff], func(t *testing.T) {
+				checkCommandDecisions(t, config, config.Root, sandboxOff, []commandDecisionCase{
+					{"companion_bang", companion + " status >!CLAUDE.md", true},
+					{"companion_append_bang", companion + " status >>!CLAUDE.md", true},
+					{"companion_both_bang", companion + " status &>!CLAUDE.md", true},
+					{"companion_pipe_clobber", companion + " status >|CLAUDE.md", true},
+					{"excluded_bang", "xcodebuild -version >!CLAUDE.md", true},
+					{"reader_bang", "cat notes.md >!CLAUDE.md", true},
+					{"companion_control", companion + " status", false},
+				})
+			})
+		}
+	})
+
+	// Finding 2: "$[...]" is zsh arithmetic, which runs a command substitution inside it.
+	t.Run("Arithmetic", func(t *testing.T) {
+		config := fakeTree(t)
+		checkCommandDecisions(t, config, config.Root, true, []commandDecisionCase{
+			{"companion_arithmetic", companion + " task $['$(id)']", true},
+			{"excluded_arithmetic", "xcodebuild -version $[1]", true},
+			{"subscript", "codex exec -s read-only $X[1] -", true},
+			{"companion_variable_control", companion + " task \"$ARGUMENTS\"", false},
+			{"pwd_control", "codex exec -s read-only -C \"$PWD\" -", false},
+		})
+	})
+
+	// Finding 3: an admitted repository path was opened by the shell or by codex after the check, so
+	// a link swapped in meanwhile was written through. No route outside the sandbox writes a file.
+	t.Run("OutputRace", func(t *testing.T) {
+		config := fakeTree(t)
+		writeTree(t, config.Root, []string{"docs/x.md"})
+		checkCommandDecisions(t, config, config.Root, true, []commandDecisionCase{
+			{"codex_output", "codex exec -s read-only -o docs/r.md -", true},
+			{"codex_output_attached", "codex exec -s read-only --output-last-message=docs/r.md -", true},
+			{"excluded_redirect", "xcodebuild -version > docs/x.log", true},
+			{"excluded_append", "xcodebuild -version >> docs/x.log", true},
+			{"excluded_read_write", "xcodebuild -version <> docs/x.md", true},
+			{"companion_redirect", companion + " result x > docs/r.md", true},
+			{"read_control", "xcodebuild -version < docs/x.md", false},
+			{"stderr_null_control", "xcodebuild -version 2>/dev/null", false},
+			{"merge_control", "xcodebuild -version 2>&1", false},
+		})
+	})
+
+	// Finding 6: a worktree outside runs/wt-* and .claude/worktrees/* had no protection but the
+	// tripwire's spelling, and git worktree add could make one anywhere.
+	t.Run("Worktrees", func(t *testing.T) {
+		config := fakeTree(t)
+		writeTree(t, config.Root, []string{
+			"runs/review/CLAUDE.md", "runs/review/containment/go/hook/x.go", "runs/review/notes.md",
+			"runs/other/CLAUDE.md", "runs/wt-ok/notes.md",
+		})
+		for name, worktree := range map[string]string{"review": "runs/review", "ok": "runs/wt-ok"} {
+			gitdir := filepath.Join(config.Root, ".git", "worktrees", name, "gitdir")
+			writeTree(t, config.Root, []string{filepath.Join(".git", "worktrees", name, "gitdir")})
+			if err := os.WriteFile(gitdir, []byte(filepath.Join(config.Root, worktree, ".git")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, tool := range []string{"Edit", "Write", "apply_patch"} {
+			t.Run(tool, func(t *testing.T) {
+				checkEditDecision(t, config, tool, filepath.Join(config.Root, "runs/review/CLAUDE.md"), true)
+				checkEditDecision(t, config, tool, filepath.Join(config.Root, "runs/review/containment/go/hook/x.go"), true)
+				checkEditDecision(t, config, tool, filepath.Join(config.Root, "runs/review/notes.md"), false)
+				// Not registered, so not a worktree: the rule comes from git's registration.
+				checkEditDecision(t, config, tool, filepath.Join(config.Root, "runs/other/CLAUDE.md"), false)
+			})
+		}
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"add_off_pattern", "git worktree add runs/review2", true},
+			{"add_outside", "git worktree add -b topic ../elsewhere", true},
+			{"add_through_dash_c", "git -C runs worktree add review3", true},
+			{"add_expansion", "git worktree add $DIR", true},
+			{"add_parent_step", "git worktree add runs/wt-a/../review4", true},
+			{"add_nested", "git worktree add runs/wt-a/inner", true},
+			{"move_off_pattern", "git worktree move runs/wt-ok runs/moved", true},
+			{"add_runs_control", "git worktree add runs/wt-new", false},
+			{"add_claude_control", "git worktree add -b topic .claude/worktrees/topic main", false},
+			{"add_dash_c_control", "git -C runs worktree add wt-x", false},
+			{"move_control", "git worktree move runs/wt-ok runs/wt-moved", false},
+			{"list_control", "git worktree list", false},
+		})
+		root, err := canonicalPath(config.Root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rules := denyRules(config)
+		for _, want := range []string{
+			"Edit(/" + filepath.Join(config.Root, "runs/wt-*/CLAUDE.md") + ")",
+			"Edit(/" + filepath.Join(config.Root, "runs/WT-*/CLAUDE.md") + ")",
+			"Edit(/" + filepath.Join(config.Root, ".claude/worktrees/*/containment/go") + "/**)",
+		} {
+			if !slices.Contains(rules, want) {
+				t.Errorf("deny rules lack %s", want)
+			}
+		}
+		lines := checkWorktrees(config)
+		var failed, passed []string
+		for _, line := range lines {
+			if line.OK {
+				passed = append(passed, line.Text)
+			} else {
+				failed = append(failed, line.Text)
+			}
+		}
+		if len(failed) != 1 || !strings.Contains(failed[0], filepath.Join(root, "runs/review")) && !strings.Contains(failed[0], filepath.Join(config.Root, "runs/review")) {
+			t.Errorf("check must FAIL the off-pattern worktree runs/review and only it: %q", failed)
+		}
+		if len(passed) != 1 {
+			t.Errorf("check must pass the worktree runs/wt-ok (the control): %q", passed)
+		}
+	})
+
+	// Finding 7: options were read without their values, and quotes hid the subcommand.
+	t.Run("TestOptions", func(t *testing.T) {
+		config := fakeTree(t)
+		checkCommandDecisions(t, config, config.Root, false, []commandDecisionCase{
+			{"output_takes_c", "go test -o -c ./x", true},
+			{"quoted_subcommand", "go te''st ./x", true},
+			{"double_quoted_subcommand", "go \"test\" ./x", true},
+			{"unknown_option", "go test -newflag -c ./x", true},
+			{"cargo_no_run_after_dashes", "cargo test --test probe -- --no-run", true},
+			{"cargo_value_takes_no_run", "cargo test --test --no-run", true},
+			{"run_value_control", "go test -c -run -c=false ./x", false},
+			{"run_then_c_control", "go test -run X -c ./...", false},
+			{"cargo_control", "cargo test --test probe --no-run", false},
+			{"cargo_package_control", "cargo test -p d1-bap --no-run", false},
 		})
 	})
 }

@@ -177,13 +177,13 @@ func TestHookBash(t *testing.T) {
 	inside := config.Root
 	outside := config.Home
 	nonet := config.LauncherDirectory + "/d1-nonet " + config.Root + "/d1-server/target/release/d1-recomp run --seconds 5"
-	// The log goes to runs/: "$TMPDIR/NAME" was checked by its spelling alone (GPT 6.1 sol final
-	// review of PR 9, finding 2).
-	codexHeredoc := "codex exec -s read-only -C \"$PWD\" -o docs/r.md - <<'EOF' > runs/codex.log 2>&1\n" +
+	// No -o and no file redirection: codex and the shell open those files outside every sandbox,
+	// after this check (second review of PR 9, findings 1 and 3). The output is on stdout.
+	codexHeredoc := "codex exec -s read-only -C \"$PWD\" - <<'EOF' 2>&1\n" +
 		"d1-recomp spawns clang; review it | carefully & say $(why) `now`\nEOF\n"
 	codexContinued := "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex exec -m gpt-6.1-sol \\\n" +
 		"  -c model_reasoning_effort='\"high\"' -s read-only -C \"$PWD\" --ephemeral --color never \\\n" +
-		"  -o docs/research/r.md - <<'EOF' > runs/codex.log 2>&1\nthe task\nEOF"
+		"  - <<'EOF' 2>&1\nthe task\nEOF"
 	companionPath := "/Users/ryanheffernan/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs"
 	companion := "node " + companionPath
 	cases := []struct {
@@ -201,7 +201,7 @@ func TestHookBash(t *testing.T) {
 		{companion + " task x; curl y", true, inside, "\";\" starts another command"},
 		{companion + " task $(curl x)", true, inside, "can run another command"},
 		{"node /tmp/codex-companion.mjs task x", true, inside, "runs only as node on its installed script"},
-		{"node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs\" task x", true, inside, "\"${\" expands a parameter"},
+		{"node \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs\" task x", true, inside, "is an expansion this check does not read"},
 		{"node other.js", true, inside, "is not a launcher"},
 		{"ls -la", false, inside, ""},
 		// Tests run inside the game profile, and a plain "go test" inside the agent sandbox used to
@@ -270,11 +270,13 @@ func TestHookBash(t *testing.T) {
 		{"codex exec -s danger-full-access 'do it'", true, inside, "is not admitted"},
 		{"codex exec -s workspace-write 'do it'", true, inside, ""},
 		{"codex exec -c model_reasoning_effort='\"xhigh\"' -s read-only 'do it'", true, inside, ""},
-		{"codex exec -s read-only -o " + config.Home + "/.zshrc -", true, inside, "writes its output inside"},
-		{"codex exec -s read-only -o docs/research/r.md -", true, inside, ""},
+		{"codex exec -s read-only -o " + config.Home + "/.zshrc -", true, inside, "writes that file outside every sandbox"},
+		{"codex exec -s read-only -o docs/research/r.md -", true, inside, "writes that file outside every sandbox"},
+		{"xcodebuild -version > docs/x.log 2>&1", true, inside, "writes no file by redirection"},
+		{"xcodebuild -version 2>&1", true, inside, ""},
 		{"xcodebuild -version > " + config.Root + "/CLAUDE.md", true, inside, "which is protected"},
 		{"security find-identity > CLAUDE.md", true, inside, "which is protected"},
-		{"codex exec -s read-only -o " + config.Home + "/.claude/settings.json -", true, inside, "is protected"},
+		{"codex exec -s read-only -o " + config.Home + "/.claude/settings.json -", true, inside, "writes that file outside every sandbox"},
 		{"system_profiler SPHardwareDataType > containment/go/profiles/game.sb", true, inside, "which is protected"},
 		{"cargo test --no-run -p d1-bap", false, inside, ""},
 		{"go test -c -o testbin/ ./internal/...", false, inside, ""},
@@ -308,7 +310,7 @@ func TestHookTripwire(t *testing.T) {
 	inside := config.Root
 	outside := config.Home
 	refused := "which is protected, and is not a pure read"
-	codex := "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex exec -m gpt-6-astra -s read-only --ephemeral - <<'EOF' > log 2>&1\n" +
+	codex := "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex exec -m gpt-6-astra -s read-only --ephemeral - <<'EOF' 2>&1\n" +
 		"Read CLAUDE.md and containment/go/profiles/game.sb, then review game.sb.\nEOF"
 	cases := []struct {
 		command string

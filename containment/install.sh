@@ -132,17 +132,26 @@ echo "== codex control (profile d1 under the installed requirements: what it mus
 # permitted": a missing path, or a Codex that cannot apply the policy, is not a refusal. A probe
 # removes only what it created: an entry that was there before, a dangling link included, is left
 # (GPT 6.1 sol final review of PR 9, finding 9), and a directory it made is removed only if empty.
+# This terminal changes nothing at a path an agent can write except under noclobber in a directory
+# mktemp made here, and the whole of such a directory with rm -rf, which does not follow links: a
+# removal or a link inside the repository runs under profile d1 itself, so a path an agent swapped
+# for a link mid-probe reaches only what an agent could reach anyway (second review of PR 9,
+# findings 4 and 8).
 codex_in() { local workspace=$1; shift; "$codex" sandbox macos -P d1 --include-managed-config -C "$workspace" -- "$@" 2>&1; }
 codex_failed=0
 # probe WORKSPACE PATH LABEL EXPECT: EXPECT is "write" (a control: it must succeed) or "refuse".
 probe() {
-  local workspace=$1 path=$2 label=$3 expect=$4 out status=0 existed=no missing="" dir
+  local workspace=$1 path=$2 label=$3 expect=$4 out status=0 existed=no dir
+  local -a missing=()
   if [ -e "$path" ] || [ -L "$path" ]; then existed=yes; fi
   dir=${path%/*}
-  while [ ! -e "$dir" ] && [ ! -L "$dir" ]; do missing+="$dir"$'\n'; dir=${dir%/*}; done
+  while [ ! -e "$dir" ] && [ ! -L "$dir" ]; do missing+=("$dir"); dir=${dir%/*}; done
   out=$(codex_in "$workspace" /bin/sh -c 'mkdir -p "${1%/*}" && : >> "$1"' probe "$path") || status=$?
-  if [ "$existed" = no ] && [ -f "$path" ] && [ ! -L "$path" ]; then rm -f "$path"; fi
-  while IFS= read -r dir; do [ -n "$dir" ] && rmdir "$dir" 2>/dev/null || true; done <<< "$missing"
+  if [ "$existed" = no ]; then
+    codex_in "$workspace" /bin/sh -c 'if [ -f "$1" ] && [ ! -L "$1" ]; then rm -f "$1"; fi; shift; for dir do rmdir "$dir" 2>/dev/null; done; :' \
+      cleanup "$path" ${missing[@]+"${missing[@]}"} > /dev/null || true
+    if [ -f "$path" ] && [ ! -L "$path" ]; then echo "note: this probe made $path and profile d1 refuses removing it; remove it by hand"; fi
+  fi
   if [ "$expect" = write ]; then
     if [ "$status" = 0 ]; then echo "OK   codex control: profile d1 writes $label"; return 0; fi
     echo "FAIL codex control: profile d1 could not write $label, so the refusals below prove nothing: $out"; exit 2
@@ -153,21 +162,34 @@ probe() {
     *) echo "FAIL codex: writing $label failed without a sandbox refusal: $out"; codex_failed=1 ;;
   esac; fi
 }
+# runs/ must be the repository's own directory: were it a link to somewhere outside the workspace,
+# every refusal below would be the workspace boundary's and not the profile's. Each directory a probe
+# uses is made by mktemp with a name nobody can guess, and each also gets a control write from the
+# repository's workspace, which fails if the directory is not inside it.
+if [ -L "$root/runs" ] || { [ -e "$root/runs" ] && [ ! -d "$root/runs" ]; }; then
+  echo "FAIL codex control: $root/runs is not a plain directory, so the probes would not measure the profile"; exit 2
+fi
 mkdir -p "$root/runs"
-probe "$root" "$root/runs/.codex-control-$$" "runs/" write
+probe_dir=$(mktemp -d "$root/runs/.codex-control.XXXXXX")
+probe "$root" "$probe_dir/probe" "runs/" write
+rm -rf "$probe_dir"
 for name in CLAUDE.md containment/install.sh .cargo/config.toml containment/go/.codex-probe containment/c/.codex-probe .claude/hooks/.codex-probe .git/hooks/.codex-probe; do
   probe "$root" "$root/$name" "$name" refuse
 done
 
 # Worktrees (finding 5): the profile's glob keys, measured on two worktree directories made here,
 # with Codex started in the repository (the worktree is a directory in its workspace) and started in
-# the worktree (the worktree is its workspace root, which the d1 hook does not cover).
-lower="$root/runs/wt-codex-probe-$$"
-upper="$root/runs/WT-codex-probe-$$"
-mkdir "$lower" "$upper"
-mkdir -p "$lower/containment/go"
-: > "$lower/CLAUDE.md"
-: > "$upper/CLAUDE.md"
+# the worktree (the worktree is its workspace root, which the d1 hook does not cover). The files the
+# probes aim at are made first, under noclobber, so neither a planted file nor a planted link is
+# truncated or followed into an existing file.
+lower=$(mktemp -d "$root/runs/wt-codex-probe.XXXXXX")
+upper=$(mktemp -d "$root/runs/WT-codex-probe.XXXXXX")
+if ! ( set -C; mkdir "$lower/containment" "$lower/containment/go" && : > "$lower/CLAUDE.md" && : > "$upper/CLAUDE.md" ); then
+  rm -rf "$lower" "$upper"
+  echo "FAIL codex control: the worktree probe directories changed while they were being made"; exit 2
+fi
+probe "$root" "$lower/control.txt" "runs/wt-*/, a directory in the repository" write
+probe "$root" "$upper/control.txt" "runs/WT-*/, a directory in the repository" write
 probe "$lower" "$lower/notes.txt" "a worktree, as its root" write
 probe "$root" "$lower/CLAUDE.md" "runs/wt-*/CLAUDE.md" refuse
 probe "$root" "$upper/CLAUDE.md" "runs/WT-*/CLAUDE.md" refuse
@@ -178,30 +200,34 @@ rm -rf "$lower" "$upper"
 
 # Hard links (finding 8). A link to an unprotected file is the control; then a link to CLAUDE.md is
 # either refused, or made and refused when opened for writing. A link that opens for writing stops
-# the install. Only the names made here are removed; never a byte is written through one.
-source_file="$root/runs/.codex-link-source-$$"
-control_link="$root/runs/.codex-link-control-$$"
-link="$root/runs/.codex-link-$$"
-: > "$source_file"
-if codex_in "$root" /bin/ln "$source_file" "$control_link" > /dev/null; then control=made; else control=refused; fi
-rm -f "$control_link" "$source_file"
+# the install. The control's source is in $work, which no sandbox may write; each link is made under
+# profile d1 in a directory mktemp made here, with ln -n, so a link planted at the name fails with
+# "File exists" instead of putting the new link inside the directory it points to (second review of
+# PR 9, finding 8). A link that was made must be the same file as CLAUDE.md, or the probe stops.
+# Never a byte is written through one; they are removed under profile d1, with their directory.
+link_source=$(mktemp "$work/link-source.XXXXXX")
+link_dir=$(mktemp -d "$root/runs/.codex-link.XXXXXX")
+if codex_in "$root" /bin/ln -n "$link_source" "$link_dir/control" > /dev/null; then link_control=made; else link_control=refused; fi
 status=0
-out=$(codex_in "$root" /bin/ln "$root/CLAUDE.md" "$link") || status=$?
+out=$(codex_in "$root" /bin/ln -n "$root/CLAUDE.md" "$link_dir/link") || status=$?
 if [ "$status" != 0 ]; then
   case "$out" in
-    *"Operation not permitted"*) echo "OK   codex: profile d1 refuses hard-linking CLAUDE.md (a link to an unprotected file is $control)" ;;
+    *"Operation not permitted"*) echo "OK   codex: profile d1 refuses hard-linking CLAUDE.md (a link to a file no sandbox writes is $link_control)" ;;
     *) echo "FAIL codex: hard-linking CLAUDE.md failed without a sandbox refusal: $out"; codex_failed=1 ;;
   esac
+elif [ ! "$link_dir/link" -ef "$root/CLAUDE.md" ] || [ -L "$link_dir/link" ]; then
+  echo "FAIL codex: ln reported a hard link to CLAUDE.md, but $link_dir/link is not one, so the probe measured nothing"; codex_failed=1
 else
   status=0
-  out=$(codex_in "$root" /bin/sh -c ': >> "$1"' probe "$link") || status=$?
-  rm -f "$link"
+  out=$(codex_in "$root" /bin/sh -c ': >> "$1"' probe "$link_dir/link") || status=$?
   case "$status:$out" in
     0:*) echo "FAIL codex: under profile d1 a hard link to CLAUDE.md made in runs/ opens for writing, so a write through it changes CLAUDE.md"; codex_failed=1 ;;
     *"Operation not permitted"*) echo "OK   codex: profile d1 makes a hard link to CLAUDE.md but refuses opening it for writing" ;;
     *) echo "FAIL codex: opening a hard link to CLAUDE.md failed without a sandbox refusal: $out"; codex_failed=1 ;;
   esac
 fi
+codex_in "$root" /bin/rm -f "$link_dir/link" "$link_dir/control" > /dev/null || true
+rm -rf "$link_dir"
 test "$codex_failed" = 0 || { echo "FAIL codex: a protected path is writable under profile d1, or a probe could not tell"; exit 2; }
 
 echo "== check (every line must say OK; the hook takes effect in new Claude Code sessions)"

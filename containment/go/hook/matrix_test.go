@@ -111,7 +111,7 @@ func TestAccessMatrix(t *testing.T) {
 		{"The owner's sandbox-excluded", "bash", "xcodebuild -version", "", onlyElevated},
 		{"The owner's sandbox-excluded", "bash", "codex exec -s read-only x", "", onlyElevated},
 		{"The owner's sandbox-excluded", "bash", "xcodebuild -version > " + filepath.Join(config.Root, "CLAUDE.md"), "which is protected", onlyElevated},
-		{"The owner's sandbox-excluded", "bash", "codex exec -s read-only -o " + filepath.Join(config.Home, ".claude", "settings.json") + " -", "is protected", onlyElevated},
+		{"The owner's sandbox-excluded", "bash", "codex exec -s read-only -o " + filepath.Join(config.Home, ".claude", "settings.json") + " -", "writes that file outside every sandbox", onlyElevated},
 		{"The owner's sandbox-excluded", "bash", "codex exec --dangerously-bypass-approvals-and-sandbox x", "turns off the sandbox", onlyElevated},
 		{"The owner's sandbox-excluded", "bash", "codex exec -c sandbox_mode=danger-full-access x", "is not admitted", onlyElevated},
 		{"copilot", "bash", "copilot -p x --allow-tool 'shell(ls)'", "copilot is not excluded", onlyElevated},

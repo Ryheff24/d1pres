@@ -40,7 +40,7 @@ var AccessMatrix = []Row{
 		"LauncherForm (hook.go)"},
 	{"Codex through the plugin's companion script", "yes: setup, task, status, result, cancel, alone; no reviews", "yes: setup, task, status, result, cancel, alone; no reviews",
 		"CompanionForm (shell.go)"},
-	{"The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, codex exec", "yes: alone, and the line itself goes through the tripwire (they run outside the sandbox, so a redirection or -o could write a protected file); codex only with its own sandbox left on", "no",
+	{"The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, codex exec", "yes: alone, the line through the tripwire, no redirection into a file and no codex -o (they run outside the sandbox, so the file would be opened after the check); codex only with its own sandbox left on", "no",
 		"decideBash (hook.go), ExcludedForm, codexForm (shell.go)"},
 	{"copilot (its pinned path no longer exists, it has no sandbox of its own, and --allow-tool shell grants what --allow-all was refused for)", "no", "no",
 		"ExcludedForm (shell.go)"},

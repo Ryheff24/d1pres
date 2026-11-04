@@ -39,7 +39,10 @@ kept=""
 # link such as containment/go/hook/planted_test.go -> ../../../runs/payload.go, the checkout does
 # not remove an untracked one, and go test ./... compiles a linked source file as its own (GPT 6.1
 # sol final review of PR 9, finding 6). A link under containment/go or containment/c stops this
-# even when main has a file of that name.
+# even when main has a file of that name. The patterns ignore case, as the volume does: find prints
+# a planted containment/Go/hook/x_test.go as it is spelled, git's tree has no such name, and go
+# builds it as containment/go/hook (second review of PR 9, finding 5).
+shopt -s nocasematch
 while IFS= read -r path; do
   case "$path" in
     containment/go/*|containment/c/*)
@@ -52,6 +55,7 @@ while IFS= read -r path; do
     esac
   fi
 done < <(cd "$root" && find containment ! -type d ! -path '*/.gocache/*' ! -path '*/.p-*' ! -path '*/.claude/*' ! -name .DS_Store | sort)
+shopt -u nocasematch
 if [ -n "$kept" ]; then
   printf '== here but not in main (kept, never built):\n%s' "$kept"
 fi
