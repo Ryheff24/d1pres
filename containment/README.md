@@ -86,7 +86,7 @@ it cites.
 | `profiles/local.sb` | **The this-Mac-only profile** (piece 3): outbound only to the servers' loopback ports, listen on this Mac, no IPv4/IPv6 socket options, the Rust delegate, exec and job denies, writes to temporary space, the repository and cargo's caches except the protected files (`gate.ProtectedFiles`) and every directory above one |
 | `cmd/d1-localonly/main.go` | **The this-Mac-only launcher.** `d1-localonly CMD`: same shape as `d1-nonet`, with the repository root set at build time; refuses game binaries (exit 64) |
 | `gate/gate.go` | The probes and the refusal line, shared by the launchers |
-| `cmd/d1-agent-hook/main.go` | **The hook** (piece 4): reads the PreToolUse event, exits 0 (on to Claude Code's own permission flow) or 2 with one BLOCKED line; `settings` prints the block for `~/.claude/settings.json`, `check` reports the install facts |
+| `cmd/d1-agent-hook/main.go` | **The hook** (piece 4): reads the PreToolUse event, exits 0 (on to Claude Code's own permission flow) or 2 with one BLOCKED line; `settings` prints the block for `~/.claude/settings.json`, `codex-requirements` prints `/etc/codex/requirements.toml` (`hook/codex.go`), `check` reports the install facts |
 | `hook/hook.go`, `hook/shell.go`, `hook/protect.go`, `hook/install.go` | The rules: the launcher form for sandbox-off Bash, game binaries never bare, the owner's excluded programs only from elevated models and only alone (`xcrun` only to query the SDK or start simctl, devicectl, xctrace without `--launch`; `security` only as `find-identity`), a Bash command naming a protected file only as a pure read (a spelling-based tripwire), edits of protected files refused (compared by device and inode), fail closed; the settings block and the check |
 | `hook/matrix.go`, `hook/matrix_test.go` | **The access control matrix** (owner, 2026-10-25): who gets what, one row per capability, elevated models against every other model. `agent-containment.md` shows it verbatim; `TestAccessMatrix` runs probes of every row through the hook for both kinds of session and fails if a row, the hook or the doc disagree |
 | `hook/elevated.go`, `hook/elevated_test.go` | Elevated tools by model (owner, 2026-10-25; `agent-containment.md`): sessions of gpt-6.1-sol, gpt-6-astra and every Claude 5.5 and Fable 5.1 model may also run process, memory and network inspectors, kill this project's processes and open repository files in VS Code with the sandbox off; the model is read from the harness's records, which no agent may edit. The test runs under `d1-nonet` from any directory |
@@ -179,6 +179,17 @@ everything already there, your `sandbox.excludedCommands` included; an earlier h
 replaced, not duplicated), and ends with `d1-agent-hook check`: every line must say OK. Running it
 again is harmless. The hook takes effect in new Claude Code sessions.
 
+It also writes `/etc/codex/requirements.toml`, root-owned, from `d1-agent-hook codex-requirements`
+(2026-11-03; `agent-containment.md`, "In Codex, by path"). An earlier file there that differs is
+kept beside it as `requirements.toml.before-d1-agent-hook.<time>`. **It applies to every Codex
+session on this Mac:** Codex then offers only profile `d1` (`:workspace` with the protected files
+and trees read-only) and `:read-only`, so `--sandbox danger-full-access`, `--yolo` and the full
+access profile are refused in your other projects too. Remove `sandbox_mode` and
+`[sandbox_workspace_write]` from `~/.codex/config.toml` if you add them; `check` reports one. Then
+it runs Codex's own sandbox on probes: `runs/` writable, every protected path refused with
+"Operation not permitted" (a FAIL stops the install), and one hard-link probe it prints as `OK` or
+`OPEN`. A new Codex session picks up the file.
+
 It builds and caches in a directory it makes in your home (`~/.d1-agent-install.*`, removed when it
 ends), not in temporary space or in the repository: both launcher profiles allow writes under
 `/private/var/folders` and under the repository, so a game or server process running during an
@@ -190,8 +201,9 @@ command `/usr/local/libexec/d1-agent/d1-agent-hook`), one `permissions.deny` Edi
 protected file and one per protected tree (`Edit(/<root>/containment/go/**)` and the other three).
 `check` reports what it measured: the build's repository root; the directory and
 each binary root-owned, closed to other writes, with their modes; the hook and deny rules in your
-settings; each `sandbox.excludedCommands` entry one the hook knows; each protected file present and
-each protected tree a directory.
+settings; each `sandbox.excludedCommands` entry one the hook knows; `/etc/codex/requirements.toml`
+root-owned and equal to what the hook prints, and `~/.codex/config.toml` without the older sandbox
+settings; each protected file present and each protected tree a directory.
 It is a report, not the boundary. Rebuild and reinstall after any change under `containment/go`.
 Keep the macOS firewall on: for a server bound to 0.0.0.0 under `d1-localonly` it is the only
 control, because Seatbelt's `localhost` includes this Mac's own addresses, so the profile admits

@@ -64,6 +64,7 @@ func Check(config Config) []Line {
 		lines = append(lines, fact(why == "" && executable, fmt.Sprintf("install: %s root-owned, closed to other writes%s %s", path, modeText(info, err), why)))
 	}
 	lines = append(lines, checkSettings(config)...)
+	lines = append(lines, checkCodex(config)...)
 	for _, name := range gate.ProtectedFiles {
 		_, err := os.Stat(filepath.Join(config.Root, name))
 		optional := slices.Contains(optionalFiles, name)

@@ -111,5 +111,55 @@ json.dump(settings, open(path, "w"), indent=2); open(path, "a").write("\n")
 print("merged", len(block["hooks"]["PreToolUse"]), "hook entry and", len(block["permissions"]["deny"]), "deny rules into", path)
 '
 
+echo "== codex requirements (Codex keeps the protected files read-only by path, not by spelling; hook/codex.go)"
+# Applies to every Codex session on this Mac: profile d1 is the default and only writing profile,
+# :workspace and :danger-full-access are refused (developers.openai.com/codex/permissions).
+codex=/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex
+requirements=/etc/codex/requirements.toml
+"$install_dir/d1-agent-hook" codex-requirements > "$build/requirements.toml"
+if [ -f "$requirements" ] && ! cmp -s "$requirements" "$build/requirements.toml"; then
+  backup="$requirements.before-d1-agent-hook.$(date +%Y%m%d%H%M%S)"
+  sudo cp -p "$requirements" "$backup"
+  echo "codex: the earlier $requirements is kept at $backup"
+fi
+sudo install -d -o root -g wheel -m 0755 /etc/codex
+sudo install -o root -g wheel -m 0644 "$build/requirements.toml" "$requirements"
+test -x "$codex" || { echo "FAIL codex: $codex is missing, so profile d1 is unmeasured"; exit 2; }
+
+echo "== codex control (profile d1 under the installed requirements: runs/ writable, every protected path refused)"
+# Each probe opens the path for appending and writes nothing, so an existing file's bytes are never
+# changed even if the profile fails. A refusal counts only when the shell says "Operation not
+# permitted": a path that is missing, or a Codex that cannot apply the policy, is not a refusal.
+codex_write() { "$codex" sandbox macos -P d1 --include-managed-config -C "$root" -- /bin/sh -c 'mkdir -p "${1%/*}" && : >> "$1"' probe "$1" 2>&1; }
+mkdir -p "$root/runs"
+positive="$root/runs/.codex-control-$$"
+codex_write "$positive" > /dev/null || { echo "FAIL codex control: profile d1 could not write $positive, so the refusals below prove nothing"; exit 2; }
+rm -f "$positive"
+echo "OK   codex control: profile d1 writes runs/"
+codex_failed=0
+for name in CLAUDE.md containment/install.sh .cargo/config.toml containment/go/.codex-probe containment/c/.codex-probe .claude/hooks/.codex-probe .git/hooks/.codex-probe; do
+  path="$root/$name"
+  existed=no
+  [ -e "$path" ] && existed=yes
+  if out=$(codex_write "$path"); then
+    echo "FAIL codex: profile d1 opened $name for writing"
+    codex_failed=1
+  else
+    case "$out" in
+      *"Operation not permitted"*) echo "OK   codex: profile d1 refuses writing $name" ;;
+      *) echo "FAIL codex: writing $name failed without a sandbox refusal: $out"; codex_failed=1 ;;
+    esac
+  fi
+  if [ "$existed" = no ]; then rm -f "$path"; fi
+done
+link="$root/runs/.codex-link-$$"
+if "$codex" sandbox macos -P d1 --include-managed-config -C "$root" -- /bin/ln "$root/CLAUDE.md" "$link" > /dev/null 2>&1; then
+  echo "OPEN codex: profile d1 can hard-link CLAUDE.md into runs/, and a write through the link changes CLAUDE.md (known; agent-containment.md, Codex)"
+  rm -f "$link"
+else
+  echo "OK   codex: profile d1 refuses hard-linking a protected file"
+fi
+test "$codex_failed" = 0 || { echo "FAIL codex: a protected path is writable under profile d1"; exit 2; }
+
 echo "== check (every line must say OK; the hook takes effect in new Claude Code sessions)"
 "$install_dir/d1-agent-hook" check

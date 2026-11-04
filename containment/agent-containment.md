@@ -139,6 +139,31 @@ nothing under `d1-localonly` writes one, and a Bash command that names one must 
   exact path, so a rename cannot get around a file rule), and `~/.claude/settings.json` carries one
   `permissions.deny` Edit rule per file and per tree, which Claude Code also turns into a sandbox
   write denial. `TestLocalProtectedFiles` and `TestLocalProtectedTrees` keep the lists equal.
+- **In Codex, by path (2026-11-03).** Claude Code's deny rules become sandbox write denials, so a
+  Bash write there is refused whatever it spells. Codex had no such layer: its workspace-write
+  sandbox let it write anywhere in the repository but `.git`, and the tripwire was the only rule.
+  `install.sh` now writes `/etc/codex/requirements.toml`, root-owned, from
+  `d1-agent-hook codex-requirements` (`containment/go/hook/codex.go`). Managed requirements are
+  the layer Codex applies over every user config, profile and flag (Codex 0.138 or later;
+  developers.openai.com/codex/permissions and /codex/enterprise/managed-configuration):
+  - `default_permissions = "d1"`, a profile that extends `:workspace` (workspace roots writable,
+    `.git`, `.codex`, `.agents`, `.aws` read-only) and sets every protected file and tree to
+    `read`. The more specific path wins, so each stays readable and is not writable.
+  - `allowed_permission_profiles` holds `:read-only` and `d1` alone, so Codex refuses
+    `:workspace` and `:danger-full-access`, and uses profiles even where an older `-s` or
+    `sandbox_mode` is given. **This applies to every Codex session on this Mac**; outside this
+    repository `d1` is plain `:workspace`. `~/.codex/config.toml` must carry no `sandbox_mode` or
+    `[sandbox_workspace_write]` (the docs say to remove them; `check` reports one).
+  - `install.sh` measures it with `codex sandbox macos -P d1 --include-managed-config`: `runs/`
+    must be writable (the control), and opening `CLAUDE.md`, `containment/install.sh`, the absent
+    `.cargo/config.toml` and a new file in each tree for writing must fail with "Operation not
+    permitted". The probe writes no bytes. `check` reports the file root-owned and equal to what the
+    hook prints.
+  - **Not measured yet:** how Codex maps the plugin's `sandbox: "workspace-write"` request under
+    the allowlist (the docs say it falls back to an allowed value), and whether its Seatbelt rules
+    stop a hard link from `runs/` to a protected file (`install.sh` prints `OPEN` or `OK`; a write
+    through such a link changes the file). Agents cannot run `codex sandbox` (the hook refuses it),
+    so the first measurement is the owner's install.
 - **Reading them is normal.** The tripwire refuses only a command that is not a pure read, and it
   reads the line as bash reads it: a quoted or escaped `|` is text, `2>&1` writes no file, `tee` is
   matched as a word and not inside `steering`, and a tree's path counts only where it is this
@@ -168,7 +193,7 @@ Only Claude Code sends `dangerouslyDisableSandbox`, so the flag cannot be the wh
 | harness | what the event carries | what the hook does |
 |---|---|---|
 | Claude Code | `transcript_path`, the sandbox flag | the flag decides; the model comes from the transcript |
-| Codex | `model`, no flag | Codex applies its own `-s` sandbox to its tools; sandboxed rules |
+| Codex | `model`, no flag | Codex applies its own sandbox to its tools, profile `d1` from `/etc/codex/requirements.toml` (protected paths read-only); sandboxed rules |
 | Cursor (`beforeShellExecution`, or the `Shell` tool name), anything else | whatever it carries; for anything else, neither | **the sandbox-off rules apply, as if the flag were true** |
 
 An unsandboxed shell is what a harness that says nothing has, so it is treated as one and gets the
