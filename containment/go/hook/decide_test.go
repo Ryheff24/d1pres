@@ -589,6 +589,9 @@ func TestHookReachesIn(t *testing.T) {
 		{"curl http://example.com", true, ""},
 		{"git push", true, ""},
 		{"cp x y", false, ""},
+		{"ls nothere/abc.*", true, ""},                                  // a glob under a missing folder elsewhere is not the repository
+		{"ls " + config.Root + "/nothere/*", true, "'*' is not allowed"}, // a missing folder inside the repository still reaches it
+		{"ls " + filepath.Dir(config.Root) + "/*", true, "'*' is not allowed"},
 	}
 	for _, test := range cases {
 		why := hook.Decide(bashEvent(t, test.command, test.sandboxOff, outside), outside, config)

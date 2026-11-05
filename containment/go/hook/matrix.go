@@ -34,7 +34,7 @@ var AccessMatrix = []Row{
 		"RecordsTarget (elevated.go)"},
 	{"Game code: d1-recomp, d1-oracle, d1-replay, d1-srv", "yes: only as d1-nonet's program, sandbox off", "yes: only as d1-nonet's program, sandbox off",
 		"decideBash, LauncherForm (hook.go)"},
-	{"Running tests (cargo and Go test binaries)", "yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run)", "yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run)",
+	{"Running tests (cargo and Go test binaries)", "yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run), and so is a built test binary", "yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run), and so is a built test binary",
 		"runsTestsInSandbox, LauncherForm (hook.go); the test gate in each binary"},
 	{"Servers and other programs that listen", "yes: only under d1-localonly, sandbox off, never a game binary or a test", "yes: only under d1-localonly, sandbox off, never a game binary or a test",
 		"LauncherForm (hook.go)"},

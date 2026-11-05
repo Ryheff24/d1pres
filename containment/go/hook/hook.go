@@ -7,7 +7,9 @@ package hook
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -231,10 +233,13 @@ func spellsRepositoryPath(word string, bases []string, config Config) (bool, str
 		return false, ""
 	}
 	if glob := strings.IndexAny(word, "*?[{"); glob >= 0 {
-		// The repository is reached if it is inside the directory the glob is matched in.
+		// The repository is reached if it is inside the directory the glob is matched in. A
+		// directory that does not exist matches nothing, so it is judged by its nearest existing
+		// parent: within counts an outer it cannot read as containing, which made a glob under
+		// any missing directory, from any project, reach this repository.
 		directories, why := resolvedPaths(filepath.Dir(word[:glob]+"x"), bases, config)
 		for _, directory := range directories {
-			if within(directory, config.Root) {
+			if within(nearestExisting(directory), config.Root) {
 				return true, ""
 			}
 		}
@@ -247,6 +252,23 @@ func spellsRepositoryPath(word string, bases []string, config Config) (bool, str
 		}
 	}
 	return false, why
+}
+
+// nearestExisting is directory, or its closest ancestor that exists. Only "does not exist" walks
+// up; any other stat error keeps the directory, so within still fails closed on it.
+func nearestExisting(directory string) string {
+	current := filepath.Clean(directory)
+	for {
+		_, err := os.Stat(current)
+		if err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return current
+		}
+		current = parent
+	}
 }
 
 // resolvedPaths is word as absolute paths, one per base when it is relative, with ~, $HOME and $PWD
@@ -452,7 +474,12 @@ func runsTestsInSandbox(command string, config Config) string {
 			continue
 		}
 		program := filepath.Base(words[0])
-		if program != "go" && program != "cargo" || !slices.ContainsFunc(words[1:], isTestSubcommand) || onlyBuilds(program, words[1:]) {
+		// A test binary already built is a test run too. Those built from d1preservation's packages
+		// refuse themselves in another sandbox (the test gate), but the containment module's own
+		// (testbin/hook.test) carries no gate, and it ran and passed inside the agent sandbox
+		// (agent probe, 2026-11-04).
+		builtTest := isTestBinary(words[0], config) || strings.HasSuffix(words[0], ".test")
+		if !builtTest && (program != "go" && program != "cargo" || !slices.ContainsFunc(words[1:], isTestSubcommand) || onlyBuilds(program, words[1:])) {
 			continue
 		}
 		return program + " " + strings.Join(words[1:], " ") + " would run tests inside the agent sandbox, where loopback is open; " +
