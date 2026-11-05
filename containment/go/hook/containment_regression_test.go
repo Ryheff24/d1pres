@@ -96,6 +96,14 @@ func TestContainmentRegression(t *testing.T) {
 			{"direct_compile_control", "go test -c ./...", false},
 			{"wrapped_compile_control", "env go test -c ./...", false},
 			{"wrapped_test", "env go test ./...", true},
+			// A test binary already built runs tests as well: testbin/hook.test, which has no test gate,
+			// ran and passed inside the agent sandbox (agent probe, 2026-11-04).
+			{"built_go_test", config.Root + "/testbin/hook.test -test.run X", true},
+			{"built_cargo_test", config.Root + "/d1-server/target/debug/deps/d1_recomp-0123456789abcdef probe", true},
+			{"relative_go_test", "./hook.test", true},
+			{"wrapped_go_test", "env " + config.Root + "/testbin/hook.test", true},
+			{"built_test_listed_control", "ls -la " + config.Root + "/testbin/hook.test", false},
+			{"built_test_named_control", "file " + config.Root + "/d1-server/target/debug/deps/d1_recomp-0123456789abcdef", false},
 		})
 	})
 

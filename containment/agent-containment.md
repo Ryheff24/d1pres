@@ -97,7 +97,10 @@ on it. A test that needs a socket fails, visibly, and gets an in-memory transpor
   The profile lets a test write only to temporary space and `runs/`.
 - **The hook refuses a test run inside the agent sandbox** (`runsTestsInSandbox`, 2026-10-31):
   `go test` and `cargo test` (`bench`, `nextest` and cargo's `t` included) are refused unless they
-  only build (`-c`, `--no-run`), and the refusal prints the two commands above. For go the last
+  only build (`-c`, `--no-run`), and the refusal prints the two commands above. So is a test
+  binary already built (`testbin/NAME.test`, `d1-server/target/*/deps/CRATE-HASH`, any `*.test`),
+  behind a wrapper too: the containment module's own tests carry no test gate, and
+  `testbin/hook.test` ran and passed inside the agent sandbox (agent probe, 2026-11-04). For go the last
   `-c` counts, as go reads it: `go test -c -c=false ./...` runs the tests and is refused (final
   review of PR 9, finding 7). Options are read by their arity, from go 1.26's and cargo's own
   lists: a value option takes the next word, so `go test -o -c ./x` writes a binary named `-c` and
@@ -270,7 +273,11 @@ and `$PWD` expanded and compared by file identity, so `cp x ../repo/CLAUDE.md` a
 `cd ../repo && go test ./...` count as surely as the absolute root (`reachesRepository`, review of
 PR 9, R4). With the sandbox off, a `cd` the hook cannot resolve (`cd $X`, `cd $(...)`, `cd -`) or a
 path built on another variable (`$X/CLAUDE.md`) applies these rules too: where the command lands
-cannot be told. A path the command does not spell (a script that changes directory) is not seen.
+cannot be told. A glob reaches the repository when the repository is inside the directory the glob
+is matched in. A directory that does not exist matches nothing, so it is judged by its nearest
+existing parent (2026-11-05: `nothere/abc.*` in a Codex prompt from another project had counted,
+because a directory the hook cannot stat counts as containing). A path the command does not spell
+(a script that changes directory) is not seen.
 
 ## Access control matrix (owner, 2026-10-25)
 
@@ -291,7 +298,7 @@ Elevated models: `gpt-6.1-sol`, `gpt-6-astra`, `claude-opus-5-5`, `claude-sonnet
 | Edit, Write or apply_patch under a protected tree (gate.ProtectedTrees: containment/go, containment/c, .claude/hooks, .git/hooks), or of either in a worktree | no | no | ProtectedTarget, worktreeTarget (protect.go) |
 | Edit, Write or apply_patch of the session records (~/.claude/projects except each memory/, ~/.codex/sessions) | no | no | RecordsTarget (elevated.go) |
 | Game code: d1-recomp, d1-oracle, d1-replay, d1-srv | yes: only as d1-nonet's program, sandbox off | yes: only as d1-nonet's program, sandbox off | decideBash, LauncherForm (hook.go) |
-| Running tests (cargo and Go test binaries) | yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run) | yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run) | runsTestsInSandbox, LauncherForm (hook.go); the test gate in each binary |
+| Running tests (cargo and Go test binaries) | yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run), and so is a built test binary | yes: only under d1-nonet; go test and cargo test are refused in the sandbox unless they only build (-c, --no-run), and so is a built test binary | runsTestsInSandbox, LauncherForm (hook.go); the test gate in each binary |
 | Servers and other programs that listen | yes: only under d1-localonly, sandbox off, never a game binary or a test | yes: only under d1-localonly, sandbox off, never a game binary or a test | LauncherForm (hook.go) |
 | Codex through the plugin's companion script | yes: setup, task, status, result, cancel, alone; no reviews | yes: setup, task, status, result, cancel, alone; no reviews | CompanionForm (shell.go) |
 | The owner's sandbox-excluded programs: xcodebuild, codesign, system_profiler, codex exec | yes: alone, the line through the tripwire, no redirection into a file and no codex -o (they run outside the sandbox, so the file would be opened after the check); codex only with its own sandbox left on; codesign only to display or verify, to standard output | no | decideBash (hook.go), ExcludedForm, codexForm (shell.go) |
