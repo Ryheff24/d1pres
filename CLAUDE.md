@@ -26,7 +26,7 @@ All paths absolute.
 | cargo | `~/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo` (not on PATH) |
 | build the lifter | `cd d1-server && cargo build --release -p d1-recomp` (whole-workspace and `-p` builds differ; the workspace build fails on Linux-only `d1-live`) |
 | build the Go tools | `cd tools/d1 && make build` (`D1_BUILD_JOBS` 1 to 5) |
-| the one number | `/usr/local/libexec/d1-agent/d1-nonet <repo>/d1-server/target/release/d1-srv number --arm native= --repeat 1 --out <repo>/runs/number-<stamp>`; re-read with `--reuse <repo>/runs/<run>`. Exit 2 = no valid number. Contained runs need no per-run approval |
+| the Tower number | `/usr/local/libexec/d1-agent/d1-nonet <repo>/d1-server/target/release/d1-srv number --arm native= --repeat 1 --out <repo>/runs/number-<stamp>`; re-read with `--reuse <repo>/runs/<run>`. Exit 2 = no valid number. Contained runs need no per-run approval |
 | Rust tests | build in the sandbox: `cargo test --no-run -p CRATE`; run each printed binary: `/usr/local/libexec/d1-agent/d1-nonet <repo>/d1-server/target/debug/deps/CRATE-HASH [filter]` |
 | Go tests | build in the sandbox: `cd tools/d1 && go test -c -o <repo>/testbin/ ./internal/...`; run: `/usr/local/libexec/d1-agent/d1-nonet <repo>/testbin/NAME.test [-test.run X]` |
 | servers | `/usr/local/libexec/d1-agent/d1-localonly /abs/program ARGS` (never game binaries; the hook refuses tests here) |
@@ -152,8 +152,11 @@ Client first: native only, our own layer at Tiger's foundation and Bungie's rend
 Performance floor p99.9 at or above 30 fps (physics is tied to frame rate). Server: Go, a separate
 process, one-to-many, parallel state machines per player, owns all state; the Activity Host runs
 mission logic; coordination specified in TLA+ before it is built; never remove a client force until
-the server answer is proven. Progress is one number: PS4 import calls our imitation layer answers in
-one Tower run (`spec/01-start-here/01.9-roadmap.md` banner), printed before and after each session.
+the server answer is proven. The goal is understanding the game's systems: every client system gets
+a machine (`d1 systems` prints the map and its counts). Progress is never one number (owner,
+2026-11-10): the import-call count of one Tower run measures only how much of the PS4 imitation is
+still called. The roadmap (`spec/01-start-here/01.9-roadmap.md`) is one driver among several. What
+every brief, hand-back and merge follows is `spec/09-tools/09.44-orchestration-protocol.md`.
 
 ## Map
 
