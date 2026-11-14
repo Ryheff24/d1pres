@@ -149,7 +149,10 @@ the installed game/local-only containment, protected files and refusal rules rem
 ## Direction (settled; details in `spec/01-start-here/01.6-direction.md`)
 
 Client first: native only, our own layer at Tiger's foundation and Bungie's render backend on Metal.
-Performance floor p99.9 at or above 30 fps (physics is tied to frame rate). Server: Go, a separate
+Performance floor p99.9 at or above 30 fps. That physics is tied to frame rate is the reason given
+for the floor, not a measured fact: each Havok step is a fixed 1/30 s, and that the game steps once
+per frame is not yet shown on 56578 (`spec/07-game-knowledge/research/07.41-physics-read-2026-11-13.md`
+§3). Server: Go, a separate
 process, one-to-many, parallel state machines per player, owns all state; the Activity Host runs
 mission logic; coordination specified in TLA+ before it is built; never remove a client force until
 the server answer is proven. The goal is understanding the game's systems: every client system gets
