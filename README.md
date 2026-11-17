@@ -93,4 +93,4 @@ A personal project, not a product. There are no releases and no support.
 
 ## License
 
-Not chosen yet. The C files carry GPL-2.0-or-later headers.
+Apache-2.0, the same as agentlog. See [LICENSE](LICENSE).
