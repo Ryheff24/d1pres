@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: Copyright 2026 Destiny 1 Preservation Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: Apache-2.0
 // Boot gate (containment/netguard-requirements.md, decision record). Its profile is compiled in: the
 // normalized containment/go/profiles/game.sb. A bare run applies it; under d1-nonet the same policy
 // is already applied and the apply stacks; under any other sandbox the kernel refuses the apply and

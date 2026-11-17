@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: Copyright 2026 Destiny 1 Preservation Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: Apache-2.0
 // Test gate (owner, 2026-10-19: every test runs inside the network sandbox, with no exceptions and
 // no sorting of tests into networking and not). install.sh compiles this file and d1netgate.c (its
 // entry renamed d1_testgate_netgate) into the root-owned /usr/local/libexec/d1-agent/libd1testgate.a.
