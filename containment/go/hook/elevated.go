@@ -19,7 +19,7 @@ import (
 // "mythos is elevated as well", claude-mythos-5-1). Exact model ids as the harness records them; a
 // provider-prefixed id (anthropic/claude-opus-5-5 through OpenRouter) is not one of them. The access
 // control matrix (matrix.go) is the summary.
-var ElevatedModels = []string{"gpt-6.1-sol", "gpt-6-astra", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5-2"}
+var ElevatedModels = []string{"gpt-6.1-sol", "gpt-6-astra", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5-2", "gpt-6.2-sol", "gpt-6.2-astra"}
 
 // anthropicAPI is the only base URL an elevated Claude Code session talks to. A session started
 // with ANTHROPIC_BASE_URL set to anything else (ori, OpenRouter, a local proxy) stays at the current
