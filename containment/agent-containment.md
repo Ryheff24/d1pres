@@ -288,7 +288,7 @@ or if this table differs from the code. The owner, in their own terminal, is out
 refusal names this section.
 
 <!-- access control matrix: generated from containment/go/hook/matrix.go (MatrixTable); TestAccessMatrix fails when this differs -->
-Elevated models: `gpt-6.1-sol`, `gpt-6-astra`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-1`, `claude-mythos-5-1`, `claude-fable-5-2`. Every other model, Claude Code subagents included (each by its own model), is the second column.
+Elevated models: `gpt-6.1-sol`, `gpt-6-astra`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-1`, `claude-mythos-5-1`, `claude-fable-5-2`, `gpt-6.2-sol`, `gpt-6.2-astra`. Every other model, Claude Code subagents included (each by its own model), is the second column.
 
 | capability | elevated models | every other model | enforced by |
 |---|---|---|---|
